@@ -1,42 +1,12 @@
 from collections import namedtuple
 from pprint import pprint
+from tabulate import tabulate
 import argparse
 import math
 import numpy as np
 import pyopencl as cl
-import pyopencl.array as cl_array
 import sys
 import time
-
-KernelVariant = namedtuple("KernelVariant", ["name", "typename", "nbytes", "init_value", "mad_func", "total_mads"])
-FLOAT_MAD = lambda x,y: f"mad({x},{y},{x})"
-INTEGER_MAD = lambda x,y: f"({x}*{y})+{x}"
-FAST_INTEGER_MAD = lambda x,y: f"mad24({x},{y},{x})"
-kernel_variants = [
-    KernelVariant("f64", "double", 8, np.float64(1.3), FLOAT_MAD, 1024),
-    KernelVariant("f32", "float", 4, np.float32(1.3), FLOAT_MAD, 2048),
-    KernelVariant("f16", "half", 2, np.float16(1.3), FLOAT_MAD, 4096),
-    KernelVariant("s64", "long", 8, np.int64(4), INTEGER_MAD, 512),
-    KernelVariant("s32", "int", 4, np.int32(4), INTEGER_MAD, 1024),
-    KernelVariant("s16", "short", 2, np.int16(4), INTEGER_MAD, 2048),
-    KernelVariant("s8", "char", 1, np.int8(4), INTEGER_MAD, 4096),
-    KernelVariant("fast_s32", "int", 4, np.int32(4), FAST_INTEGER_MAD, 2048),
-]
-
-class NanoTimer:
-    def __init__(self):
-        self.start_ns = None
-        self.end_ns = None
-
-    def __enter__(self):
-        self.start_ns = time.time_ns()
-        return self
-
-    def __exit__(self, *args):
-        self.end_ns = time.time_ns()        
-
-    def get_delta_ns(self):
-        return self.end_ns - self.start_ns
 
 def create_program_source(typename, mad_func, total_mads):
     T = typename
@@ -285,6 +255,21 @@ def get_device_info(device):
             pass
     return info
 
+class NanoTimer:
+    def __init__(self):
+        self.start_ns = None
+        self.end_ns = None
+
+    def __enter__(self):
+        self.start_ns = time.time_ns()
+        return self
+
+    def __exit__(self, *args):
+        self.end_ns = time.time_ns()        
+
+    def get_delta_ns(self):
+        return self.end_ns - self.start_ns
+
 def convert_to_si_prefix(x):
     if x >= 1e12: return ("T", x*1e-12)
     if x >= 1e9:  return ("G", x*1e-9)
@@ -296,34 +281,72 @@ def convert_to_si_prefix(x):
     if x >= 1e-9: return ("n", x*1e9)
     else:         return ("n", x*1e9)
 
-def main():
-    platforms = cl.get_platforms()
-    platform_infos = list(map(get_platform_info, platforms))
-    if len(platforms) > 1:
-        print(f"> Listing platforms ({len(platforms)})")
-        pprint(platform_infos)
+KernelVariant = namedtuple("KernelVariant", ["name", "typename", "nbytes", "init_value", "mad_func", "total_mads"])
+FLOAT_MAD = lambda x,y: f"mad({x},{y},{x})"
+INTEGER_MAD = lambda x,y: f"({x}*{y})+{x}"
+FAST_INTEGER_MAD = lambda x,y: f"mad24({x},{y},{x})"
+KERNEL_VARIANTS = [
+    KernelVariant("f64", "double", 8, np.float64(1.3), FLOAT_MAD, 512),
+    KernelVariant("f32", "float", 4, np.float32(1.3), FLOAT_MAD, 2048),
+    KernelVariant("f16", "half", 2, np.float16(1.3), FLOAT_MAD, 4096),
+    KernelVariant("s64", "long", 8, np.int64(4), INTEGER_MAD, 512),
+    KernelVariant("s32", "int", 4, np.int32(4), INTEGER_MAD, 1024),
+    KernelVariant("s16", "short", 2, np.int16(4), INTEGER_MAD, 2048),
+    KernelVariant("s8", "char", 1, np.int8(4), INTEGER_MAD, 4096),
+    KernelVariant("fast_s32", "int", 4, np.int32(4), FAST_INTEGER_MAD, 2048),
+]
+KERNEL_NAMES = [v.name for v in KERNEL_VARIANTS]
+KERNEL_LOOKUP = {v.name:v for v in KERNEL_VARIANTS}
 
-    platform_index = 0
-    platform = platforms[platform_index]
-    platform_info = platform_infos[platform_index]
+class FancyKernelResultPrinter:
+    def __init__(self):
+        self.is_terminated = False
 
-    print(f"> Selected platform ({platform_index})")
-    pprint(platform_info)
+    def print_header(self):
+        print("+----------+-------+--------------+\n"\
+              "| name     | width | speed        |\n"\
+              "+==========+=======+==============+", flush=True)
 
+    def print_row(self, variant, width, iops):
+        prefix, si_iops = convert_to_si_prefix(iops)
+        si_iops = f"{si_iops:.2f}"
+        iop_string = f"{si_iops:>6} {prefix}IOPS"
+        print(f"| {variant.name:<8} | {str(width):<5} | {iop_string:<12} |", flush=True)
+        self.is_terminated = False
 
-    devices = platform.get_devices()
-    device_infos = list(map(get_device_info, devices))
-    if len(devices) > 1:
-        print(f"> Listing devices ({len(devices)})")
-        pprint(device_infos)
+    def print_divider(self):
+        if self.is_terminated: return
+        self.is_terminated = True
+        print("+----------+-------+--------------+", flush=True)
 
-    device_index = 0
-    device = devices[device_index]
-    device_info = device_infos[device_index]
+    def __enter__(self):
+        self.print_header()
+        return self
 
-    print(f"> Selected device ({device_index})")
-    pprint(device_info)
+    def __exit__(self, *args):
+        self.print_divider()
 
+class BasicKernelResultPrinter:
+    def __init__(self):
+        return
+
+    def print_header(self):
+        print("name, width, speed", flush=True)
+
+    def print_row(self, variant, width, iops):
+        print(f"{variant.name}, {width}, {iops:.0f}", flush=True)
+
+    def print_divider(self):
+        return
+
+    def __enter__(self):
+        self.print_header()
+        return self
+
+    def __exit__(self, *args):
+        self.print_divider()
+
+def run_benchmarks(platform, platform_info, device, device_info, kernel_variants, fancy_print):
     context = cl.Context(devices=[device])
 
     print("> Creating compute programs")
@@ -336,7 +359,6 @@ def main():
         programs.append(gpu_program)
 
     print("> Running kernels")
-    sys.stdout.flush()
     total_iters = 32
     total_warmup = 4
     max_compute_units = device_info["max_compute_units"]
@@ -344,51 +366,154 @@ def main():
     max_workgroup_threads = device_info["max_work_group_size"]
     max_mem_alloc_size = device_info["max_mem_alloc_size"]
 
-    for kernel_variant, program in zip(kernel_variants, programs):
-        sizeof_type = kernel_variant.nbytes
-        max_global_threads = max_compute_units*workgroups_per_compute_unit*max_workgroup_threads
-        max_global_threads = min(max_global_threads*sizeof_type, max_mem_alloc_size) // sizeof_type
-        max_global_threads = (max_global_threads//max_workgroup_threads) * max_workgroup_threads
+    sys.stdout.flush() # busy loop prevent stdout flush
 
-        y_gpu = cl.Buffer(context, cl.mem_flags.WRITE_ONLY, max_global_threads*sizeof_type)
+    printer = FancyKernelResultPrinter() if fancy_print else BasicKernelResultPrinter()
+    with printer:
+        for kernel_variant, program in zip(kernel_variants, programs):
+            sizeof_type = kernel_variant.nbytes
+            max_global_threads = max_compute_units*workgroups_per_compute_unit*max_workgroup_threads
+            max_global_threads = min(max_global_threads*sizeof_type, max_mem_alloc_size) // sizeof_type
+            max_global_threads = (max_global_threads//max_workgroup_threads) * max_workgroup_threads
 
-        kernels = [
-            (program.compute_1, 1),
-            (program.compute_2, 2),
-            (program.compute_4, 4),
-            (program.compute_8, 8),
-            (program.compute_16, 16),
-        ]
+            y_gpu = cl.Buffer(context, cl.mem_flags.WRITE_ONLY, max_global_threads*sizeof_type)
 
-        iops_per_mad = 2
-        mads_per_thread = kernel_variant.total_mads
-        iops_per_thread = iops_per_mad*mads_per_thread
-        A = kernel_variant.init_value
+            kernels = [
+                (program.compute_1, 1),
+                (program.compute_2, 2),
+                (program.compute_4, 4),
+                (program.compute_8, 8),
+                (program.compute_16, 16),
+            ]
 
-        global_size = max_global_threads
-        workgroup_size = max_workgroup_threads
+            iops_per_mad = 2
+            mads_per_thread = kernel_variant.total_mads
+            iops_per_thread = iops_per_mad*mads_per_thread
+            A = kernel_variant.init_value
 
-        for kernel, stride in kernels:
-            kernel.set_arg(0, y_gpu)
-            kernel.set_arg(1, A)
+            global_size = max_global_threads
+            workgroup_size = max_workgroup_threads
 
-            with cl.CommandQueue(context) as queue:
-                for _ in range(total_warmup):
-                    cl.enqueue_nd_range_kernel(queue, kernel, (global_size,), (workgroup_size,))
-                    queue.flush()
+            for kernel, width in kernels:
+                kernel.set_arg(0, y_gpu)
+                kernel.set_arg(1, A)
 
-            queue = cl.CommandQueue(context)
-            with NanoTimer() as timer:
-                for _ in range(total_iters):
-                    cl.enqueue_nd_range_kernel(queue, kernel, (global_size,), (workgroup_size,))
-                    queue.flush()
-                queue.finish()
-            delta_ns = timer.get_delta_ns()
+                with cl.CommandQueue(context) as queue:
+                    for _ in range(total_warmup):
+                        cl.enqueue_nd_range_kernel(queue, kernel, (global_size,), (workgroup_size,))
+                        queue.flush()
 
-            iops = global_size*iops_per_thread*total_iters / (delta_ns*1e-9)
-            prefix, si_iops = convert_to_si_prefix(iops)
-            print(f"name={kernel_variant.name}x{stride}, iops={si_iops:.3f} {prefix}ops", flush=True)
+                queue = cl.CommandQueue(context)
+                with NanoTimer() as timer:
+                    for _ in range(total_iters):
+                        cl.enqueue_nd_range_kernel(queue, kernel, (global_size,), (workgroup_size,))
+                        queue.flush()
+                    queue.finish()
+                delta_ns = timer.get_delta_ns()
 
+                iops = global_size*iops_per_thread*total_iters / (delta_ns*1e-9)
+                printer.print_row(kernel_variant, width, iops)
+            printer.print_divider()
+
+def list_platforms(platforms):
+    print(f"> Listing {len(platforms)} platforms")
+    platform_infos = list(map(get_platform_info, platforms))
+    table = []
+    headers = ["name", "vendor", "version"]
+    for info in platform_infos:
+        table.append([info.get(key, "Unknown") for key in headers])
+    print(tabulate(table, headers=headers, showindex="always", tablefmt="grid"))
+
+def list_devices(devices):
+    print(f"> Listing {len(devices)} devices")
+    device_infos = list(map(get_device_info, devices))
+    table = []
+    headers = ["name", "vendor", "version"]
+    for info in device_infos:
+        table.append([info.get(key, "Unknown") for key in headers])
+    print(tabulate(table, headers=headers, showindex="always", tablefmt="grid"))
+
+def list_kernels(kernels):
+    print(f"> Listing {len(kernels)} kernels")
+    table = []
+    headers = ["name", "typename", "total_mads"]
+    for k in kernels:
+        table.append([k.name, k.typename, k.total_mads])
+    print(tabulate(table, headers=headers, tablefmt="outline"))
+
+def main():
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument("--platform", type=int, default=0, help="Platform index")
+    parser.add_argument("--device", type=int, default=0, help="Device index")
+    parser.add_argument("--list-platforms", action="store_true", help="List platforms")
+    parser.add_argument("--list-devices", action="store_true", help="List devices")
+    parser.add_argument("--list-kernels", action="store_true", help="List kernels")
+    parser.add_argument("--kernels", default=None, help=f"[{','.join(KERNEL_NAMES)}]")
+    parser.add_argument("--print-csv", action="store_true", help="Print results as csv")
+    args = parser.parse_args()
+
+    if args.list_kernels:
+        list_kernels(KERNEL_VARIANTS)
+        return
+
+    if args.kernels == None:
+        selected_kernel_names = KERNEL_NAMES
+    else:
+        selected_kernel_names = [name.strip() for name in args.kernels.split(',')]
+
+    selected_kernels = []
+    for name in selected_kernel_names:
+        kernel = KERNEL_LOOKUP.get(name)
+        if kernel == None:
+            print(f"Unknown kernel {name} skipping")
+        else:
+            selected_kernels.append(kernel)
+
+    if len(selected_kernels) == 0:
+        print("Please select at least one kernel")
+        list_kernels(KERNEL_VARIANTS)
+        return
+ 
+    platforms = cl.get_platforms()
+
+    if args.list_platforms:
+        list_platforms(platforms)
+        return
+
+    if args.platform >= len(platforms):
+        print(f"Platform index {args.platform} is invalid for {len(platforms)} platforms")
+        list_platforms(platforms)
+        return
+
+    platform = platforms[args.platform]
+    platform_info = get_platform_info(platform)
+
+    print(f"> Selected platform ({args.platform})")
+    headers = ["name", "vendor", "version"]
+    table = [[key, platform_info.get(key, "Unknown")] for key in headers]
+    print(tabulate(table, tablefmt="outline"))
+
+    devices = platform.get_devices()
+    if args.list_devices:
+        list_devices(devices)
+        return
+
+    if args.device >= len(devices):
+        print(f"Device index {args.device} is invalid for {len(devices)} devices")
+        list_devices(devices)
+        return
+
+    device = devices[args.device]
+    device_info = get_device_info(device)
+
+    print(f"> Selected device ({args.device})")
+    headers = ["name", "vendor", "version"]
+    table = [[key, device_info.get(key, "Unknown")] for key in headers]
+    print(tabulate(table, tablefmt="outline"))
+
+    list_kernels(selected_kernels)
+    fancy_print = not args.print_csv
+    run_benchmarks(platform, platform_info, device, device_info, selected_kernels, fancy_print)
 
 if __name__ == "__main__":
     main()
