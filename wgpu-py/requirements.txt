@@ -1,0 +1,7 @@
+ipympl
+ipywidgets
+matplotlib
+notebook
+numpy
+tqdm
+wgpu
