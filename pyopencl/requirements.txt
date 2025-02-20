@@ -1,0 +1,8 @@
+ipympl
+ipywidgets
+matplotlib
+notebook
+numpy
+pyopencl
+siphash24
+tqdm
