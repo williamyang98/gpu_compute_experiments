@@ -193,7 +193,7 @@ print(f"> read queries", flush=True)
 
 gpu_delta_ns = (query_cpu[1::2] - query_cpu[0::2]).astype(np.float32) * 10 # NOTE: need to rescale results
 gpu_delta_ns_avg = np.mean(gpu_delta_ns)
-gpu_cell_rate = total_cells / (gpu_delta_ns_avg*1e-9) * total_compute_passes * total_shader_loops
+gpu_cell_rate = total_cells / (gpu_delta_ns_avg*1e-9) * total_shader_loops
 gpu_flops = gpu_cell_rate*flops_per_cell
 print(f"=== GPU MEASUREMENTS ===")
 print(f"gpu_delta_avg={gpu_delta_ns_avg*1e-3:.3f} us")
@@ -234,7 +234,7 @@ for i in range(total_compute_passes):
     delta_ns = end_ns - start_ns
     cpu_delta_ns[i] = delta_ns
 cpu_delta_ns_avg = np.mean(cpu_delta_ns)
-cpu_cell_rate = total_cells / (cpu_delta_ns_avg*1e-9) * total_compute_passes * total_shader_loops
+cpu_cell_rate = total_cells / (cpu_delta_ns_avg*1e-9) * total_shader_loops
 cpu_flops = cpu_cell_rate*flops_per_cell
 print(f"=== CPU MEASUREMENTS ===")
 print(f"cpu_delta_avg={cpu_delta_ns_avg*1e-3:.3f} us")
