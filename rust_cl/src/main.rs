@@ -1,102 +1,51 @@
 use std::{ffi::c_void, ptr::null_mut};
-use std::sync::{Condvar, Mutex, Arc, mpsc};
-use std::time::{Instant, Duration};
+use std::sync::{Condvar, Mutex, Arc};
+use std::time::Instant;
 use opencl3::{
     command_queue::{CommandQueue, CL_QUEUE_PROFILING_ENABLE}, 
     context::Context, device::Device, 
     error_codes::ClError, 
     event::Event,
-    kernel::{ExecuteKernel, Kernel},
     memory::{Buffer, CL_MEM_READ_WRITE},
     platform::get_platforms, 
-    program::Program,
-    types::{cl_bool, cl_event},
+    types::cl_bool,
 };
-use ndarray::{Array1, Array3, Array4, s};
+use ndarray::{Array1, Array4, s};
 use ndarray_npy::write_npy;
 use threadpool::ThreadPool;
+use ytdlp_server::{
+    simulation::{Simulation, SimulationCpuData},
+    constants as C,
+    pool::{PoolChannel, PoolEntry},
+};
 
 fn main() -> Result<(), String> {
     run().map_err(|err| err.to_string())
 }
 
-enum ReadbackBufferState {
-    Pending(Event, usize),
-    Closed,
-    Empty,
+struct FieldReadbackBuffer {
+    grid_size: Array1<usize>,
+    data_cpu: Array4<f32>,
+    data_gpu: Buffer<f32>,
 }
 
-impl ReadbackBufferState {
-    fn is_closed(&self) -> bool {
-        match self {
-            Self::Closed => true,
-            _ => false,
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        match self {
-            Self::Empty => true,
-            _ => false,
-        }
-    }
-
-    fn is_pending(&self) -> bool {
-        match self {
-            Self::Pending(_, _) => true,
-            _ => false,
-        }
+impl FieldReadbackBuffer {
+    fn new(context: &Context, grid_size: Array1<usize>) -> Result<Self, ClError> {
+        let n_dims = 3;
+        let (n_x, n_y, n_z) = (grid_size[0], grid_size[1], grid_size[2]);
+        let data_cpu = Array4::<f32>::zeros((n_x, n_y, n_z, n_dims));
+        let data_gpu = unsafe { Buffer::<f32>::create(&context, CL_MEM_READ_WRITE, data_cpu.len(), null_mut::<c_void>()) }?;
+        Ok(Self {
+            grid_size,
+            data_cpu,
+            data_gpu,
+        })
     }
 }
 
-struct ReadbackBuffer<T, U> {
-    gpu_buffer: Mutex<Buffer<T>>,
-    cpu_buffer: Mutex<U>,
-    state: Mutex<ReadbackBufferState>,
-    signal_state: Condvar,
-}
-
-impl<T,U> ReadbackBuffer<T,U> {
-    fn new(gpu_buffer: Buffer<T>, cpu_buffer: U) -> Self {
-        Self {
-            gpu_buffer: Mutex::new(gpu_buffer),
-            cpu_buffer: Mutex::new(cpu_buffer),
-            state: Mutex::new(ReadbackBufferState::Empty),
-            signal_state: Condvar::new(),
-        }
-    }
-
-    fn wait_busy(&self) {
-        let mut state = self.state.lock().unwrap();
-        while state.is_empty()  {
-            state = self.signal_state.wait(state).unwrap();
-        }
-    }
-
-    fn free(&self) {
-        let mut state = self.state.lock().unwrap();
-        *state = ReadbackBufferState::Empty;
-        self.signal_state.notify_one();
-    }
- 
-    fn acquire(&self) {
-        let mut state = self.state.lock().unwrap();
-        while state.is_pending() {
-            state = self.signal_state.wait(state).unwrap();
-        }
-    }
-
-    fn make_busy(&self, ev: Event, iter: usize) {
-        let mut state = self.state.lock().unwrap();
-        *state = ReadbackBufferState::Pending(ev, iter);
-        self.signal_state.notify_one();
-    }
-
-    fn close(&self) {
-        let mut state = self.state.lock().unwrap();
-        *state = ReadbackBufferState::Closed;
-        self.signal_state.notify_one();
-    }
+struct FieldReadbackData {
+    ev_copy: Event,
+    curr_iter: usize,
 }
 
 fn run() -> Result<(), ClError> {
@@ -121,101 +70,38 @@ fn run() -> Result<(), ClError> {
     let device = selected_device.expect("No available opencl device");
     let context = Arc::new(Context::from_device(&device)?);
 
-    let max_compute_units: usize = device.max_compute_units()? as usize;
-    let workgroups_per_compute_unit: usize = 2048;
-    let max_workgroup_threads: usize = device.max_work_group_size()?;
-    let max_mem_alloc_size: usize = device.max_mem_alloc_size()? as usize;
-    let f32_size = size_of::<f32>();
-    let max_global_threads = {
-        let n: usize = max_compute_units*workgroups_per_compute_unit*max_workgroup_threads;
-        let n = usize::min(n*f32_size, max_mem_alloc_size) / f32_size;
-        let n = (n / max_workgroup_threads) * max_workgroup_threads;
-        n
-    };
-
-
     let n_dims: usize = 3;
     let grid_size = Array1::from(vec![16, 256, 512]);
     let (n_x, n_y, n_z) = (grid_size[0], grid_size[1], grid_size[2]);
-    let workgroup_size = Array1::from(vec![1, 1, 256]);
-    let total_workgroup_size: usize = workgroup_size.iter().product();
-    assert!(total_workgroup_size <= max_workgroup_threads);
 
-    let total_cells: usize = grid_size.iter().product();
-    let dispatch_size = &grid_size / &workgroup_size;
-    let global_size = &dispatch_size * &workgroup_size;
+    let mut simulation_data = SimulationCpuData::new(grid_size.clone());
+    init_simulation_data(&mut simulation_data);
+    simulation_data.bake_constants();
 
-    let c_0: f32 = 299792458.0;
-    let pi = std::f32::consts::PI;
-    let mu_0: f32 = 4.0*pi*1e-7;
-    let e_0: f32 = 1.0/(mu_0 * c_0.powi(2));
-    let Z_0: f32 = mu_0*c_0;
-    let d_xyz: f32 = 1e-3;
-    let dt: f32 = 1e-12;
-
-    let mut e_k = Array3::<f32>::from_elem((n_x, n_y, n_z), e_0);
-    let mut sigma_k = Array3::<f32>::from_elem((n_x, n_y, n_z), 0.0);
+    let mut simulation = Simulation::new(grid_size.clone(), &context)?;
 
     {
-        let sigma_0: f32 = 1e8;
-        let i = s![.., 30..90, 30..40];
-        sigma_k.slice_mut(i).fill(sigma_0);
-    }
-
-    let a0_cpu: Array3<f32> = 1.0/(1.0 + &sigma_k/&e_k * dt);
-    let a1_cpu: Array3<f32> = 1.0/(&e_k * d_xyz) * dt;
-    let b0_cpu: f32 = 1.0/(&mu_0 * d_xyz) * dt;
-    let mut E_cpu = Array4::<f32>::zeros((n_x, n_y, n_z, n_dims));
-    let mut H_cpu = Array4::<f32>::zeros((n_x, n_y, n_z, n_dims));
-    let mut cE_cpu = Array4::<f32>::zeros((n_x, n_y, n_z, n_dims));
-    let mut cH_cpu = Array4::<f32>::zeros((n_x, n_y, n_z, n_dims));
-    {
-        let w: usize = 10;
-        let a: Array1<f32> = ndarray::linspace(0.0, 2.0*pi, w*2).collect();
-        let a = 0.53836 - 0.46164*a.cos();
-        let c = n_z/2;
-        let i = s![5..=6,..,c-w..c+w,0];
-        E_cpu
-            .slice_mut(i)
-            .axis_iter_mut(ndarray::Axis(1))
-            .for_each(|mut row| row.assign(&a));
-        H_cpu
-            .slice_mut(i)
-            .axis_iter_mut(ndarray::Axis(1))
-            .for_each(|mut row| row.assign(&a));
-    }
-
-    let mut E_gpu = unsafe { Buffer::<f32>::create(&context, CL_MEM_READ_WRITE, E_cpu.len(), null_mut::<c_void>())? };
-    let mut H_gpu = unsafe { Buffer::<f32>::create(&context, CL_MEM_READ_WRITE, H_cpu.len(), null_mut::<c_void>())? };
-    let mut cE_gpu = unsafe { Buffer::<f32>::create(&context, CL_MEM_READ_WRITE, cE_cpu.len(), null_mut::<c_void>())? };
-    let mut cH_gpu = unsafe { Buffer::<f32>::create(&context, CL_MEM_READ_WRITE, cH_cpu.len(), null_mut::<c_void>())? };
-    let mut a0_gpu = unsafe { Buffer::<f32>::create(&context, CL_MEM_READ_WRITE, a0_cpu.len(), null_mut::<c_void>())? };
-    let mut a1_gpu = unsafe { Buffer::<f32>::create(&context, CL_MEM_READ_WRITE, a1_cpu.len(), null_mut::<c_void>())? };
-    {
-        let queue_props =  0;
-        let queue = CommandQueue::create_default(&context, queue_props)?;
-        let _ev = unsafe { queue.enqueue_write_buffer(&mut E_gpu, false as cl_bool, 0, E_cpu.as_slice().unwrap(), &[]) }?;
-        let _ev = unsafe { queue.enqueue_write_buffer(&mut H_gpu, false as cl_bool, 0, H_cpu.as_slice().unwrap(), &[]) }?;
-        let _ev = unsafe { queue.enqueue_write_buffer(&mut cE_gpu, false as cl_bool, 0, cE_cpu.as_slice().unwrap(), &[]) }?;
-        let _ev = unsafe { queue.enqueue_write_buffer(&mut cH_gpu, false as cl_bool, 0, cH_cpu.as_slice().unwrap(), &[]) }?;
-        let _ev = unsafe { queue.enqueue_write_buffer(&mut a0_gpu, false as cl_bool, 0, a0_cpu.as_slice().unwrap(), &[]) }?;
-        let _ev = unsafe { queue.enqueue_write_buffer(&mut a1_gpu, false as cl_bool, 0, a1_cpu.as_slice().unwrap(), &[]) }?;
+        let queue = CommandQueue::create_default(&context, 0)?;
+        simulation.upload_data(&queue, &simulation_data)?;
         queue.finish()?;
     }
 
-    let mut E_out_readbacks: Vec<Arc<ReadbackBuffer<f32, Array4<f32>>>> = vec![];
-    const TOTAL_READBACK_BUFFERS: usize = 3;
+    const TOTAL_READBACK_BUFFERS: usize = 8;
+    const TOTAL_STEPS: usize = 8192;
+    const RECORD_STRIDE: usize = 32;
+    const IS_RECORD: bool = true;
+
+    let mut e_field_out_buffers: Vec<Arc<PoolEntry<FieldReadbackBuffer, FieldReadbackData>>> = vec![];
     for _ in 0..TOTAL_READBACK_BUFFERS {
-        let mut E_cpu = Array4::<f32>::zeros((n_x, n_y, n_z, n_dims));
-        let E_gpu = unsafe { Buffer::<f32>::create(&context, CL_MEM_READ_WRITE, E_cpu.len(), null_mut::<c_void>())? };
-        E_out_readbacks.push(Arc::new(ReadbackBuffer::new(E_gpu, E_cpu)));
+        let readback_buffer = FieldReadbackBuffer::new(&context, grid_size.clone())?;
+        let pool_entry = PoolEntry::new(readback_buffer);
+        e_field_out_buffers.push(Arc::new(pool_entry));
     }
-    let mut E_out_readback_index: usize = 0;
 
     let pool = ThreadPool::new(TOTAL_READBACK_BUFFERS); 
-    for (index, E_out_readback) in E_out_readbacks.iter().enumerate() {
+    for (index, e_field_out) in e_field_out_buffers.iter().enumerate() {
         pool.execute({
-            let E_out_readback = E_out_readback.clone();
+            let e_field_out = e_field_out.clone();
             let context = context.clone();
             move || {
                 let queue_props = 0;
@@ -224,128 +110,167 @@ fn run() -> Result<(), ClError> {
                 println!("[readback][{0}] Created queue {1} us", index, timer.elapsed().as_micros());
 
                 loop {
-                    E_out_readback.wait_busy();
-                    let state = E_out_readback.state.lock().unwrap();
-                    let (ev_copy, curr_iter) = match &*state {
-                        ReadbackBufferState::Empty => panic!("Shouldn't get empty data"),
-                        ReadbackBufferState::Closed => {
+                    // wait for gpu to gpu read
+                    e_field_out.wait_pending_or_close();
+                    let lock_state = e_field_out.state.lock().unwrap();
+                    let readback_data = match &*lock_state {
+                        PoolChannel::Empty => panic!("Shouldn't get empty data"),
+                        PoolChannel::Closed => {
                             println!("[readback][{0}] Closing readback thread", index);
                             break;
                         },
-                        ReadbackBufferState::Pending(ev_copy, curr_iter) => (ev_copy, *curr_iter),
+                        PoolChannel::Pending(readback_data) => readback_data,
                     };
 
+                    // read from gpu to cpu
                     let timer = Instant::now();
+                    let mut lock_value = e_field_out.value.lock().unwrap();
+                    let readback_buffer = &mut *lock_value;
                     let ev_read = unsafe { 
-                        let gpu_buffer = E_out_readback.gpu_buffer.lock().unwrap();
-                        let mut cpu_buffer = E_out_readback.cpu_buffer.lock().unwrap();
-                        queue.enqueue_read_buffer(&gpu_buffer, false as cl_bool, 0, cpu_buffer.as_slice_mut().unwrap(), &[ev_copy.get()]) 
+                        queue.enqueue_read_buffer(
+                            &readback_buffer.data_gpu, 
+                            false as cl_bool, 0, 
+                            readback_buffer.data_cpu.as_slice_mut().unwrap(), 
+                            &[readback_data.ev_copy.get()],
+                        )
                     }.unwrap();
-                    drop(state);
 
+                    // wait for read to finish
                     ev_read.wait().unwrap();
                     queue.finish().unwrap();
                     println!("[readback][{0}] Read cpu buffer {1} us", index, timer.elapsed().as_micros());
 
+                    // dump cpu data
                     let timer = Instant::now();
-                    let cpu_buffer = E_out_readback.cpu_buffer.lock().unwrap();
-                    write_npy(format!("./data/E_cpu_{0}.npy", curr_iter), &*cpu_buffer).unwrap();
+                    write_npy(format!("./data/E_cpu_{0}.npy", readback_data.curr_iter), &readback_buffer.data_cpu).unwrap();
                     println!("[readback][{0}] Wrote to file {1} us", index, timer.elapsed().as_micros());
-
-                    E_out_readback.free();
+                    // mark gpu/cpu readback buffers as available
+                    drop(lock_state);
+                    e_field_out.signal_free();
                 }
             }
         });
     }
 
-    let shader_src: &'static str = include_str!("./shader.cl");
-    let mut program = Program::create_from_source(&context, shader_src)?;
-    program.build(context.devices(), "")?;
-    let mut kernel_update_E = Kernel::create(&program, "update_E")?;
-    let mut kernel_update_H = Kernel::create(&program, "update_H")?;
+    let mut evs_update_e_field: Vec<Event> = vec![];
+    let mut evs_update_h_field: Vec<Event> = vec![];
+    evs_update_e_field.reserve(TOTAL_STEPS);
+    evs_update_h_field.reserve(TOTAL_STEPS);
 
-    const TOTAL_LOOPS: usize = 8192;
-    // const RECORD_STRIDE: usize = 32;
-    const RECORD_STRIDE: usize = 16;
-    let global_timer = Instant::now();
     {
-        // let queue_props =  0;
-        let queue_props =  CL_QUEUE_PROFILING_ENABLE;
+        let max_workgroup_threads: usize = device.max_work_group_size()?;
+        let workgroup_size = Array1::from(vec![1, 1, 256]);
+        let total_workgroup_size: usize = workgroup_size.iter().product();
+        assert!(total_workgroup_size <= max_workgroup_threads);
+
+
+        // let queue_props = 0;
+        let queue_props = CL_QUEUE_PROFILING_ENABLE;
         let queue = CommandQueue::create_default(&context, queue_props)?;
-        let mut last_ev_update_H: Option<Event> = None;
-        let mut wait_update_H: Vec<cl_event> = vec![];
-        for curr_iter in 0..TOTAL_LOOPS {
-            wait_update_H.clear();
-            if let Some(ev) = last_ev_update_H {
-                wait_update_H.push(ev.get());
+        let mut e_field_out_index: usize = 0;
+
+        let global_timer = Instant::now();
+        for curr_iter in 0..TOTAL_STEPS {
+            let [ev_update_e_field, ev_update_h_field] = simulation.step(&queue, workgroup_size.clone(), &[])?;
+            if curr_iter % RECORD_STRIDE == 0 && IS_RECORD {
+                // grab available buffer
+                let index = e_field_out_index; 
+                e_field_out_index = (e_field_out_index+1) % TOTAL_READBACK_BUFFERS;
+                let e_field_out = &mut e_field_out_buffers[index];
+                let timer = Instant::now();
+                e_field_out.wait_empty();
+                println!("[main][{0}] Waited for readback buffer {1} for {2} us", curr_iter, index, timer.elapsed().as_micros());
+                // readback on gpu
+                let mut readback_buffer = e_field_out.value.lock().unwrap();
+                let size = readback_buffer.data_cpu.len();
+                let ev_copy = unsafe { queue.enqueue_copy_buffer(&simulation.e_field, &mut readback_buffer.data_gpu, 0, 0, size, &[ev_update_h_field.get()]) }?;
+                e_field_out.signal_pending(FieldReadbackData { ev_copy, curr_iter });
             }
+            unsafe { queue.enqueue_barrier_with_wait_list(&[ev_update_h_field.get()]) }?;
 
-            unsafe {
-                let ev_update_E = ExecuteKernel::new(&kernel_update_E)
-                    .set_arg(&E_gpu)
-                    .set_arg(&H_gpu)
-                    .set_arg(&cH_gpu)
-                    .set_arg(&a0_gpu)
-                    .set_arg(&a1_gpu)
-                    .set_arg(&(n_x as i32))
-                    .set_arg(&(n_y as i32))
-                    .set_arg(&(n_z as i32))
-                    .set_global_work_sizes(global_size.as_slice().unwrap())
-                    .set_local_work_sizes(workgroup_size.as_slice().unwrap())
-                    .set_event_wait_list(&wait_update_H)
-                    .enqueue_nd_range(&queue)?;
-                let ev_update_H = ExecuteKernel::new(&kernel_update_H)
-                    .set_arg(&E_gpu)
-                    .set_arg(&H_gpu)
-                    .set_arg(&cE_gpu)
-                    .set_arg(&b0_cpu)
-                    .set_arg(&(n_x as i32))
-                    .set_arg(&(n_y as i32))
-                    .set_arg(&(n_z as i32))
-                    .set_global_work_sizes(global_size.as_slice().unwrap())
-                    .set_local_work_sizes(workgroup_size.as_slice().unwrap())
-                    .set_event_wait_list(&[ev_update_E.get()])
-                    .enqueue_nd_range(&queue)?;
-                last_ev_update_H = Some(ev_update_H);
-
-                if curr_iter % RECORD_STRIDE == 0 {
-                    let index = E_out_readback_index; 
-                    let E_out_readback = &mut E_out_readbacks[index];
-                    E_out_readback_index = (E_out_readback_index+1) % TOTAL_READBACK_BUFFERS;
-                    let timer = Instant::now();
-                    E_out_readback.acquire();
-                    println!("[main][{0}] Waited for readback buffer {1} for {2} us", curr_iter, index, timer.elapsed().as_micros());
-                    let ev_copy = { 
-                        let mut gpu_buffer = E_out_readback.gpu_buffer.lock().unwrap();
-                        let cpu_buffer = E_out_readback.cpu_buffer.lock().unwrap();
-                        let size = cpu_buffer.len();
-                        drop(cpu_buffer);
-                        queue.enqueue_copy_buffer(&E_gpu, &mut gpu_buffer, 0, 0, size, &[ev_update_E.get()]) 
-                    }?;
-                    E_out_readback.make_busy(ev_copy, curr_iter);
-                }
-
-                queue.flush()?;
-            }
-
+            // trace step events
+            evs_update_e_field.push(ev_update_e_field);
+            evs_update_h_field.push(ev_update_h_field);
+            queue.flush()?;
         }
         queue.finish()?;
-    }
-    {
+        // benchmark performance
         let elapsed = global_timer.elapsed();
         let elapsed_secs: f64 = (elapsed.as_nanos() as f64)*1e-9;
-        let cell_rate = ((total_cells * TOTAL_LOOPS) as f64)/elapsed_secs * 1e-6;
+        let total_cells: usize = simulation.grid_size.iter().product();
+        let cell_rate = ((total_cells * TOTAL_STEPS) as f64)/elapsed_secs * 1e-6;
         println!("total_cells={0}", total_cells);
-        println!("total_loops={0}", TOTAL_LOOPS);
+        println!("total_loops={0}", TOTAL_STEPS);
         println!("cell_rate={0:.3} M/s", cell_rate);
     }
-
-    E_out_readbacks.iter().for_each(|x| {
-        x.acquire();
-        x.close();
+    // wait for readback threads to finish
+    e_field_out_buffers.iter().for_each(|buffer| {
+        buffer.wait_empty();
+        buffer.signal_close();
     });
     pool.join();
+
+    let ns_per_tick: u64 = device.profiling_timer_resolution()? as u64;
+    {
+        let ns_elapsed: u64 = evs_update_e_field.iter()
+            .map(|ev| {
+                let ticks_start: u64 = ev.profiling_command_start().unwrap();
+                let ticks_end: u64 = ev.profiling_command_end().unwrap();
+                let ns_start = ticks_start*ns_per_tick;
+                let ns_end = ticks_end*ns_per_tick;
+                let ns_delta = ns_end-ns_start;
+                ns_delta
+            })
+            .sum();
+        let ns_elapsed_avg: f64 = (ns_elapsed as f64)/(TOTAL_STEPS as f64);
+        println!("update_e_field: {0:.3} ms", ns_elapsed_avg*1e-6);
+    }
+    {
+        let ns_elapsed: u64 = evs_update_h_field.iter()
+            .map(|ev| {
+                let ticks_start: u64 = ev.profiling_command_start().unwrap();
+                let ticks_end: u64 = ev.profiling_command_end().unwrap();
+                let ns_start = ticks_start*ns_per_tick;
+                let ns_end = ticks_end*ns_per_tick;
+                let ns_delta = ns_end-ns_start;
+                ns_delta
+            })
+            .sum();
+        let ns_elapsed_avg: f64 = (ns_elapsed as f64)/(TOTAL_STEPS as f64);
+        println!("update_h_field: {0:.3} ms", ns_elapsed_avg*1e-6);
+    }
 
     Ok(())
 }
 
+fn init_simulation_data(data: &mut SimulationCpuData) {
+    let grid_size = &data.grid_size;
+    let (n_x, n_y, n_z) = (grid_size[0], grid_size[1], grid_size[2]);
+    let d_xyz: f32 = 1e-3;
+    let dt: f32 = 1e-12;
+
+    data.d_xyz = d_xyz;
+    data.dt = dt;
+    {
+        let sigma_0: f32 = 1e8;
+        let i = s![.., 30..90, 30..40];
+        data.sigma_k.slice_mut(i).fill(sigma_0);
+    }
+
+    {
+        let w: usize = 10;
+        let a: Array1<f32> = ndarray::linspace(0.0, 2.0*C::PI, w*2).collect();
+        // hann window
+        let a = 0.53836 - 0.46164*a.cos();
+        let c = n_z/2;
+        let i = s![5..=6,..,c-w..c+w,0];
+        data.e_field
+            .slice_mut(i)
+            .axis_iter_mut(ndarray::Axis(1))
+            .for_each(|mut row| row.assign(&a));
+        data.h_field
+            .slice_mut(i)
+            .axis_iter_mut(ndarray::Axis(1))
+            .for_each(|mut row| row.assign(&a));
+    }
+}

@@ -1,11 +1,10 @@
 __kernel void update_E(
-    __global float *E, __global const float *H, __global float *cH, 
-    __global float *A_0, __global float *A_1,
+    __global float *E, __global const float *H,
+    __global const float *A0, __global const float *A1,
     int Nx, int Ny, int Nz
 ) {
-    // a = 1/2 * Co/ek * sigma_k * dxyz * Z0
-    // a_0 = (1-a)/(1+a)
-    // a_1 = Co/ek * 1/(1+a)
+    // a0 = 1/(1+sigma_k/e_k*dt)
+    // a1 = 1/(e_k*d_xyz) * dt
 
     const int ix = get_global_id(0);
     const int iy = get_global_id(1);
@@ -34,25 +33,21 @@ __kernel void update_E(
     const float cHy = dHx_dz-dHz_dx;
     const float cHz = dHy_dx-dHx_dy;
 
-    const float a_0 = A_0[i0];
-    const float a_1 = A_1[i0];
+    const float a0 = A0[i0];
+    const float a1 = A1[i0];
 
-    E[i+0] = a_0*(E[i+0] + a_1*cHx);
-    E[i+1] = a_0*(E[i+1] + a_1*cHy);
-    E[i+2] = a_0*(E[i+2] + a_1*cHz);
-
-    cH[i+0] = cHx;
-    cH[i+1] = cHy;
-    cH[i+2] = cHz;
+    E[i+0] = a0*(E[i+0] + a1*cHx);
+    E[i+1] = a0*(E[i+1] + a1*cHy);
+    E[i+2] = a0*(E[i+2] + a1*cHz);
     return;
 }
 
 __kernel void update_H(
-    __global const float *E, __global float *H, __global float *cE,
-    float b_0,
+    __global const float *E, __global float *H,
+    __global const float *B0,
     int Nx, int Ny, int Nz
 ) {
-    // a_0 = Co/ek
+    // b0 = 1/(mu_k*d_xyz) * dt
     const int ix = get_global_id(0);
     const int iy = get_global_id(1);
     const int iz = get_global_id(2);
@@ -80,12 +75,9 @@ __kernel void update_H(
     const float cEy = dEx_dz-dEz_dx;
     const float cEz = dEy_dx-dEx_dy;
 
-    H[i+0] = H[i+0] - b_0*cEx;
-    H[i+1] = H[i+1] - b_0*cEy;
-    H[i+2] = H[i+2] - b_0*cEz;
-
-    cE[i+0] = cEx;
-    cE[i+1] = cEy;
-    cE[i+2] = cEz;
+    const float b0 = B0[i0];
+    H[i+0] = H[i+0] - b0*cEx;
+    H[i+1] = H[i+1] - b0*cEy;
+    H[i+2] = H[i+2] - b0*cEz;
     return;
 }
