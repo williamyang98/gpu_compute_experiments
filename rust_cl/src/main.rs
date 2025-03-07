@@ -89,14 +89,14 @@ fn run() -> Result<Trace, ClError> {
     const RECORD_STRIDE: usize = 32;
     const IS_RECORD: bool = true;
 
-    let mut trace_readback: Vec<TraceFieldReadback> = vec![];
-    trace_readback.resize_with(TOTAL_READBACK_BUFFERS, TraceFieldReadback::default);
-    let trace_readback = Arc::new(Mutex::new(trace_readback));
+    let mut trace_readbacks: Vec<Arc<Mutex<TraceFieldReadback>>> = vec![];
+    trace_readbacks.resize_with(TOTAL_READBACK_BUFFERS, || Arc::new(Mutex::new(TraceFieldReadback::default())));
+    let trace_readbacks = Arc::new(trace_readbacks);
     let create_handler: ReadbackHandlerFactory<f32> = Box::new({
-        let trace_readback = trace_readback.clone();
-        move |_thread_id: usize| Box::new({
-            let trace_readback = trace_readback.clone();
-            move |ev_copy: Event, ev_read: Event, thread_id: usize, curr_iter: usize, data: &[f32]| {
+        let trace_readbacks = trace_readbacks.clone();
+        move |thread_id: usize| Box::new({
+            let trace_readback = trace_readbacks[thread_id].clone();
+            move |ev_copy: Event, ev_read: Event, _thread_id: usize, curr_iter: usize, data: &[f32]| {
                 debug!("Received data from thread={0}, iter={1}, data_size={2}", thread_id, curr_iter, data.len());
                 use ndarray_npy::write_npy;
                 let data = ArrayView4::from_shape((n_x,n_y,n_z,n_dims), data).unwrap();
@@ -106,9 +106,8 @@ fn run() -> Result<Trace, ClError> {
                 let trace_read = TraceSpan::from_event(&ev_read, ns_per_tick).unwrap();
 
                 let mut trace_readback = trace_readback.lock().unwrap();
-                let trace = &mut trace_readback[thread_id];
-                trace.gpu_copy.push(trace_copy);
-                trace.gpu_read.push(trace_read);
+                trace_readback.gpu_copy.push(trace_copy);
+                trace_readback.gpu_read.push(trace_read);
             }
         })
     });
@@ -176,7 +175,8 @@ fn run() -> Result<Trace, ClError> {
 
     let mut chrome_trace = Trace::default();
     {
-        for (thread_id, trace_readback) in trace_readback.lock().unwrap().iter().enumerate() {
+        for (thread_id, trace_readback) in trace_readbacks.iter().enumerate() {
+            let trace_readback = trace_readback.lock().unwrap();
             for span in trace_readback.gpu_copy.iter() {
                 chrome_trace.events.push(TraceEvent {
                     name: "copy".to_owned(),
