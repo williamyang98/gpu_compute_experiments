@@ -3,21 +3,44 @@ use std::sync::{Arc, Mutex};
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::time::Instant;
-use std::sync::mpsc::channel;
+use std::{ffi::c_void, ptr::null_mut};
+use crossbeam_channel::bounded;
 use threadpool::ThreadPool;
 use opencl3::{
     command_queue::{CommandQueue, CL_QUEUE_PROFILING_ENABLE}, 
     context::Context, device::Device, 
     error_codes::ClError, 
     event::Event,
+    types::cl_bool,
+    memory::{Buffer, CL_MEM_READ_WRITE},
 };
 use ndarray::{Array1,ArrayView4, s};
 use super::{
     simulation::{Simulation, SimulationCpuData},
     constants as C,
     chrome_trace::{TraceSpan, TraceEvent},
-    readback::{ReadbackData, ReadbackBufferArray, ReadbackHandlerFactory},
 };
+
+struct ReadbackBuffer<T> {
+    data_cpu: Vec<T>,
+    data_gpu: Buffer<T>,
+}
+
+impl<T: Sized + Default + Clone> ReadbackBuffer<T> {
+    fn new(context: &Context, size: usize) -> Result<Self, ClError> {
+        let data_cpu: Vec<T> = vec![T::default(); size];
+        let data_gpu = unsafe { Buffer::<T>::create(context, CL_MEM_READ_WRITE, size, null_mut::<c_void>()) }?;
+        Ok(Self {
+            data_cpu,
+            data_gpu,
+        })
+    }
+}
+
+struct ReadbackRequest {
+    ev_copy: Event,
+    curr_iter: usize,
+}
 
 #[derive(Default)]
 pub struct TraceFieldReadback {
@@ -96,7 +119,7 @@ pub struct App {
     cpu_data: SimulationCpuData,
     simulation: Simulation,
     pub gpu_trace: AppGpuTrace,
-    e_field_readback_array: ReadbackBufferArray<f32>,
+    e_field_readback_array: Vec<Arc<Mutex<ReadbackBuffer<f32>>>>,
     thread_pool: ThreadPool,
 }
 
@@ -105,43 +128,24 @@ impl App {
         let context = Arc::new(Context::from_device(&device)?);
 
         let grid_size = Array1::from(vec![16, 256, 512]);
-        let ns_per_tick: u64 = device.profiling_timer_resolution()? as u64;
         let n_dims = 3;
-        let (n_x, n_y, n_z) = (grid_size[0], grid_size[1], grid_size[2]);
         let total_cells: usize = grid_size.iter().product();
 
         let cpu_data = SimulationCpuData::new(grid_size.clone());
         let simulation = Simulation::new(grid_size.clone(), &context)?;
 
-        const TOTAL_READBACK_BUFFERS: usize = 3;
         let gpu_trace = AppGpuTrace::default();
         gpu_trace.readbacks.borrow_mut().resize_with(TOTAL_READBACK_BUFFERS, || {
             Arc::new(Mutex::new(TraceFieldReadback::default()))
         });
 
-        let create_readback_handler: ReadbackHandlerFactory<f32> = Box::new({
-            let trace_readbacks = gpu_trace.readbacks.clone();
-            move |thread_id: usize| Box::new({
-                let trace_readbacks = trace_readbacks.borrow_mut();
-                let trace_readback = trace_readbacks[thread_id].clone();
-                move |ev_copy: Event, ev_read: Event, _thread_id: usize, curr_iter: usize, data: &[f32]| {
-                    debug!("Received data from thread={0}, iter={1}, data_size={2}", thread_id, curr_iter, data.len());
-                    use ndarray_npy::write_npy;
-                    let data = ArrayView4::from_shape((n_x,n_y,n_z,n_dims), data).unwrap();
-                    write_npy(format!("./data/E_cpu_{0}.npy", curr_iter), &data).unwrap();
+        const TOTAL_READBACK_BUFFERS: usize = 3;
+        let e_field_readback_array = (0..TOTAL_READBACK_BUFFERS)
+            .map(|_| Arc::new(Mutex::new(ReadbackBuffer::<f32>::new(&context, total_cells*n_dims).unwrap())))
+            .collect();
 
-                    let trace_copy = TraceSpan::from_event(&ev_copy, ns_per_tick).unwrap();
-                    let trace_read = TraceSpan::from_event(&ev_read, ns_per_tick).unwrap();
-
-                    let mut trace_readback = trace_readback.lock().unwrap();
-                    trace_readback.e_field_copy.push(trace_copy);
-                    trace_readback.e_field_read.push(trace_read);
-                }
-            })
-        });
-        let e_field_readback_array = ReadbackBufferArray::<f32>::new(context.clone(), total_cells*n_dims, TOTAL_READBACK_BUFFERS, Some(create_readback_handler))?;
-
-        let thread_pool = ThreadPool::new(8);
+        // readback threads, event processing from main thread
+        let thread_pool = ThreadPool::new(TOTAL_READBACK_BUFFERS + 1);
 
         Ok(Self {
             device,
@@ -205,11 +209,14 @@ impl App {
  
     pub fn run(&mut self) -> Result<(), ClError> {
         let grid_size = &self.grid_size;
-        let ns_per_tick: u64 = self.device.profiling_timer_resolution()? as u64;
         let total_cells: usize = grid_size.iter().product();
 
+        let n_dims = 3;
+        let ns_per_tick: u64 = self.device.profiling_timer_resolution()? as u64;
+        let (n_x, n_y, n_z) = (grid_size[0], grid_size[1], grid_size[2]);
+
         // convert step events to trace points
-        let (tx_step_events, rx_step_events) = channel::<(Event, Event)>();
+        let (tx_step_events, rx_step_events) = bounded::<(Event, Event)>(128);
         self.thread_pool.execute({
             let trace = self.gpu_trace.steps.clone();
             move || {
@@ -226,6 +233,63 @@ impl App {
                 }
             }
         });
+
+        // read data from gpu to cpu
+        let total_readback_buffers = self.e_field_readback_array.len();
+        let (tx_readback_request, rx_readback_request) = bounded::<(ReadbackRequest, Arc<Mutex<ReadbackBuffer<f32>>>)>(total_readback_buffers);
+        let (tx_readback_available, rx_readback_available) = bounded::<Arc<Mutex<ReadbackBuffer<f32>>>>(total_readback_buffers);
+        for thread_id in 0..total_readback_buffers {
+            self.thread_pool.execute({
+                let rx_readback_request = rx_readback_request.clone();
+                let tx_readback_available = tx_readback_available.clone();
+                let trace_readback = self.gpu_trace.readbacks.borrow_mut()[thread_id].clone();
+                let queue_props = CL_QUEUE_PROFILING_ENABLE;
+                let queue = CommandQueue::create_default(&self.context, queue_props).unwrap();
+                move || {
+                    for (data, buffer_mutex) in rx_readback_request {
+                        let curr_iter = data.curr_iter;
+                        let mut buffer_lock = buffer_mutex.lock().unwrap();
+                        let buffer = &mut *buffer_lock;
+                        let total_elems = buffer.data_cpu.len();
+
+                        let ev_read = unsafe {
+                            queue.enqueue_read_buffer(
+                                &buffer.data_gpu,
+                                false as cl_bool, 0, 
+                                buffer.data_cpu.as_mut_slice(),
+                                &[data.ev_copy.get()],
+                            ).unwrap()
+                        };
+                        ev_read.wait().unwrap();
+
+                        debug!("Received data from thread={0}, iter={1}, data_size={2}", thread_id, curr_iter, total_elems);
+                        {
+                            use ndarray_npy::write_npy;
+                            let data = ArrayView4::from_shape((n_x,n_y,n_z,n_dims), buffer.data_cpu.as_slice()).unwrap();
+                            write_npy(format!("./data/E_cpu_{0}.npy", curr_iter), &data).unwrap();
+                        }
+
+                        let trace_copy = TraceSpan::from_event(&data.ev_copy, ns_per_tick).unwrap();
+                        let trace_read = TraceSpan::from_event(&ev_read, ns_per_tick).unwrap();
+
+                        let mut trace_readback = trace_readback.lock().unwrap();
+                        trace_readback.e_field_copy.push(trace_copy);
+                        trace_readback.e_field_read.push(trace_read);
+
+                        drop(buffer_lock);
+                        let _is_main_thread_closed = tx_readback_available.send(buffer_mutex).is_err();
+                    }
+                    queue.finish().unwrap();
+                }
+            })
+        }
+        drop(rx_readback_request);
+
+        // prepopulate channel with existing buffers
+        for buffer in self.e_field_readback_array.iter() {
+            tx_readback_available.send(buffer.clone()).unwrap();
+        }
+        drop(tx_readback_available);
 
         const TOTAL_STEPS: usize = 8192;
         const RECORD_STRIDE: usize = 32;
@@ -244,13 +308,21 @@ impl App {
         for curr_iter in 0..TOTAL_STEPS {
             let [ev_update_e_field, ev_update_h_field] = self.simulation.step(&queue, workgroup_size.clone(), &[])?;
             if curr_iter % RECORD_STRIDE == 0 && IS_RECORD {
-                // grab available buffer
-                let buffer = self.e_field_readback_array.get_free_buffer();
-                // readback on gpu
-                let mut readback_buffer = buffer.value.lock().unwrap();
-                let size = readback_buffer.data_cpu.len();
-                let ev_copy = unsafe { queue.enqueue_copy_buffer(&self.simulation.e_field, &mut readback_buffer.data_gpu, 0, 0, size, &[ev_update_h_field.get()]) }?;
-                buffer.signal_pending(Some(ReadbackData { ev_copy, curr_iter }));
+                // enqueue gpu to gpu copy and let gpu to cpu happen in readback thread
+                if let Ok(buffer_mutex) = rx_readback_available.recv() {
+                    let mut buffer_lock = buffer_mutex.lock().unwrap();
+                    let buffer = &mut *buffer_lock;
+                    let ev_copy = unsafe { 
+                        queue.enqueue_copy_buffer(
+                            &self.simulation.e_field,
+                            &mut buffer.data_gpu, 
+                            0, 0, buffer.data_cpu.len(),
+                            &[ev_update_h_field.get()]
+                        ) 
+                    }?;
+                    drop(buffer_lock);
+                    tx_readback_request.send((ReadbackRequest { ev_copy, curr_iter }, buffer_mutex)).unwrap();
+                }
             }
             unsafe { queue.enqueue_barrier_with_wait_list(&[ev_update_h_field.get()]) }?;
             tx_step_events.send((ev_update_e_field, ev_update_h_field)).unwrap();
@@ -265,8 +337,9 @@ impl App {
         info!("total_loops={0}", TOTAL_STEPS);
         info!("cell_rate={0:.3} M/s", cell_rate);
 
-        self.e_field_readback_array.join();
         drop(tx_step_events);
+        drop(tx_readback_request);
+        drop(rx_readback_available);
         self.thread_pool.join();
 
         Ok(())
