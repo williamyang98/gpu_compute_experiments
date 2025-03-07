@@ -1,3 +1,4 @@
+use log::{info, debug};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use opencl3::{
@@ -12,13 +13,16 @@ use ytdlp_server::{
     simulation::{Simulation, SimulationCpuData},
     constants as C,
     chrome_trace::{TraceSpan, Trace, TraceEvent},
-    readback::{ReadbackData, ReadbackBufferArray},
+    readback::{ReadbackData, ReadbackBufferArray, ReadbackHandlerFactory},
 };
 use std::io::{BufWriter, Write};
 use std::fs::File;
 
 fn main() -> Result<(), String> {
+    env_logger::init();
+
     let chrome_trace = run().map_err(|err| err.to_string())?;
+    info!("Writing chome trace with {0} entries", chrome_trace.events.len());
     let json_string = serde_json::to_string_pretty(&chrome_trace).unwrap();
     let file = File::create("./trace.json").unwrap();
     let mut writer = BufWriter::new(file);
@@ -74,6 +78,7 @@ fn run() -> Result<Trace, ClError> {
 
     let mut simulation = Simulation::new(grid_size.clone(), &context)?;
     {
+        debug!("Uploading initial simulation conditions");
         let queue = CommandQueue::create_default(&context, 0)?;
         simulation.upload_data(&queue, &simulation_data)?;
         queue.finish()?;
@@ -87,24 +92,27 @@ fn run() -> Result<Trace, ClError> {
     let mut trace_readback: Vec<TraceFieldReadback> = vec![];
     trace_readback.resize_with(TOTAL_READBACK_BUFFERS, TraceFieldReadback::default);
     let trace_readback = Arc::new(Mutex::new(trace_readback));
-    let handler = {
+    let create_handler: ReadbackHandlerFactory<f32> = Box::new({
         let trace_readback = trace_readback.clone();
-        move |ev_copy: Event, ev_read: Event, thread_id: usize, curr_iter: usize, data: &[f32]| {
-            println!("Received data from thread={0}, iter={1}, data_size={2}", thread_id, curr_iter, data.len());
-            use ndarray_npy::write_npy;
-            let data = ArrayView4::from_shape((n_x,n_y,n_z,n_dims), data).unwrap();
-            write_npy(format!("./data/E_cpu_{0}.npy", curr_iter), &data).unwrap();
+        move |_thread_id: usize| Box::new({
+            let trace_readback = trace_readback.clone();
+            move |ev_copy: Event, ev_read: Event, thread_id: usize, curr_iter: usize, data: &[f32]| {
+                debug!("Received data from thread={0}, iter={1}, data_size={2}", thread_id, curr_iter, data.len());
+                use ndarray_npy::write_npy;
+                let data = ArrayView4::from_shape((n_x,n_y,n_z,n_dims), data).unwrap();
+                write_npy(format!("./data/E_cpu_{0}.npy", curr_iter), &data).unwrap();
 
-            let trace_copy = TraceSpan::from_event(&ev_copy, ns_per_tick).unwrap();
-            let trace_read = TraceSpan::from_event(&ev_read, ns_per_tick).unwrap();
+                let trace_copy = TraceSpan::from_event(&ev_copy, ns_per_tick).unwrap();
+                let trace_read = TraceSpan::from_event(&ev_read, ns_per_tick).unwrap();
 
-            let mut trace_readback = trace_readback.lock().unwrap();
-            let trace = &mut trace_readback[thread_id];
-            trace.gpu_copy.push(trace_copy);
-            trace.gpu_read.push(trace_read);
-        }
-    };
-    let mut e_field_readback_array = ReadbackBufferArray::<f32>::new(context.clone(), total_cells*n_dims, TOTAL_READBACK_BUFFERS, Some(handler))?;
+                let mut trace_readback = trace_readback.lock().unwrap();
+                let trace = &mut trace_readback[thread_id];
+                trace.gpu_copy.push(trace_copy);
+                trace.gpu_read.push(trace_read);
+            }
+        })
+    });
+    let mut e_field_readback_array = ReadbackBufferArray::<f32>::new(context.clone(), total_cells*n_dims, TOTAL_READBACK_BUFFERS, Some(create_handler))?;
 
     let mut evs_update_e_field: Vec<Event> = vec![];
     let mut evs_update_h_field: Vec<Event> = vec![];
@@ -150,9 +158,9 @@ fn run() -> Result<Trace, ClError> {
             let elapsed_secs: f64 = (elapsed.as_nanos() as f64)*1e-9;
             let total_cells: usize = simulation.grid_size.iter().product();
             let cell_rate = ((total_cells * TOTAL_STEPS) as f64)/elapsed_secs * 1e-6;
-            println!("total_cells={0}", total_cells);
-            println!("total_loops={0}", TOTAL_STEPS);
-            println!("cell_rate={0:.3} M/s", cell_rate);
+            info!("total_cells={0}", total_cells);
+            info!("total_loops={0}", TOTAL_STEPS);
+            info!("cell_rate={0:.3} M/s", cell_rate);
         }
     }
 

@@ -50,11 +50,13 @@ pub struct ReadbackBufferArray<T> {
     read_index: usize,
 }
 
-impl<T: Sized + Clone + Default + Send + 'static> ReadbackBufferArray<T> {
-    pub fn new(
-        context: Arc<Context>, size: usize, total_buffers: usize,
-        handler: Option<impl ReadbackHandler<T> + Clone + Send + 'static>
-    ) -> Result<Self, ClError> {
+pub type ReadbackHandlerFactory<T> = Box<dyn FnMut(usize) -> Box<dyn ReadbackHandler<T> + Send>>;
+
+impl<T> ReadbackBufferArray<T> 
+where
+    T: Sized + Clone + Default + Send + 'static
+{
+    pub fn new(context: Arc<Context>, size: usize, total_buffers: usize, mut create_handler: Option<ReadbackHandlerFactory<T>>) -> Result<Self, ClError> {
         assert!(size > 0);
         assert!(total_buffers > 0);
         // create buffers
@@ -71,7 +73,10 @@ impl<T: Sized + Clone + Default + Send + 'static> ReadbackBufferArray<T> {
             let handle = std::thread::spawn({
                 let buffer = buffer.clone();
                 let context = context.clone();
-                let mut handler = handler.clone();
+                let mut handler = None;
+                if let Some(ref mut create_handler) = create_handler {
+                    handler = Some(create_handler(index)); 
+                }
 
                 move || {
                     let queue_props = CL_QUEUE_PROFILING_ENABLE;

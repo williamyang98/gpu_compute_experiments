@@ -886,6 +886,7 @@ dependencies = [
  "anyhow",
  "clap",
  "env_logger",
+ "log",
  "ndarray",
  "ndarray-npy",
  "opencl3",
