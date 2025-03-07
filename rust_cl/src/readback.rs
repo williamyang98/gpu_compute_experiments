@@ -127,7 +127,9 @@ where
             read_index: 0,
         })
     }
+}
 
+impl<T> ReadbackBufferArray<T> {
     pub fn get_free_buffer(&mut self) -> &mut Arc<PoolEntry<ReadbackBuffer<T>, Option<ReadbackData>>> {
         let index = self.read_index; 
         self.read_index = (self.read_index+1) % self.buffers.len();
@@ -139,6 +141,12 @@ where
     pub fn join(&mut self) {
         self.buffers.iter().for_each(|buffer| {
             buffer.wait_empty();
+        });
+    }
+
+    pub fn close(&mut self) {
+        self.buffers.iter().for_each(|buffer| {
+            buffer.wait_empty();
             buffer.signal_close();
         });
 
@@ -147,5 +155,11 @@ where
                 handle.join().expect("readback thread should join gracefully")
             }
         }
+    }
+}
+
+impl<T> Drop for ReadbackBufferArray<T> {
+    fn drop(&mut self) {
+        self.close();
     }
 }
