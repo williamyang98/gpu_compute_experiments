@@ -112,14 +112,12 @@ fn run() -> Result<Trace, ClError> {
         }
     }
 
-    let platform = selected_platform.expect("No available opencl platform");
+    let _platform = selected_platform.expect("No available opencl platform");
     let device = selected_device.expect("No available opencl device");
     let context = Arc::new(Context::from_device(&device)?);
 
     let ns_per_tick: u64 = device.profiling_timer_resolution()? as u64;
-    let n_dims: usize = 3;
     let grid_size = Array1::from(vec![16, 256, 512]);
-    let (n_x, n_y, n_z) = (grid_size[0], grid_size[1], grid_size[2]);
 
     let mut simulation_data = SimulationCpuData::new(grid_size.clone());
     init_simulation_data(&mut simulation_data);
@@ -134,7 +132,7 @@ fn run() -> Result<Trace, ClError> {
     }
 
     const TOTAL_READBACK_BUFFERS: usize = 3;
-    const TOTAL_STEPS: usize = 512;
+    const TOTAL_STEPS: usize = 8192;
     const RECORD_STRIDE: usize = 32;
     const IS_RECORD: bool = true;
 
@@ -342,7 +340,7 @@ fn init_simulation_data(data: &mut SimulationCpuData) {
     data.dt = dt;
     {
         let sigma_0: f32 = 1e8;
-        let i = s![.., 30..90, 30..40];
+        let i = s![0..n_x, 30..90, 30..40];
         data.sigma_k.slice_mut(i).fill(sigma_0);
     }
 
@@ -352,7 +350,7 @@ fn init_simulation_data(data: &mut SimulationCpuData) {
         // hann window
         let a = 0.53836 - 0.46164*a.cos();
         let c = n_z/2;
-        let i = s![5..=6,..,c-w..c+w,0];
+        let i = s![5..=6,0..n_y,c-w..c+w,0];
         data.e_field
             .slice_mut(i)
             .axis_iter_mut(ndarray::Axis(1))
