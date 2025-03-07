@@ -1,5 +1,5 @@
 use std::{ffi::c_void, ptr::null_mut};
-use std::sync::{Condvar, Mutex, Arc};
+use std::sync::Arc;
 use std::time::{Instant, Duration};
 use opencl3::{
     command_queue::{CommandQueue, CL_QUEUE_PROFILING_ENABLE}, 
@@ -11,22 +11,19 @@ use opencl3::{
     types::cl_bool,
 };
 use ndarray::{Array1, Array4, s};
-use ndarray_npy::write_npy;
-use threadpool::ThreadPool;
 use ytdlp_server::{
     simulation::{Simulation, SimulationCpuData},
     constants as C,
     pool::{PoolChannel, PoolEntry},
 };
 use std::thread::JoinHandle;
-use serde_json::json;
 use std::io::{BufWriter, Write};
 use std::fs::File;
 use ytdlp_server::chrome_trace::{Trace, TraceEvent};
 
 fn main() -> Result<(), String> {
     let chrome_trace = run().map_err(|err| err.to_string())?;
-    let json_string = serde_json::to_string(&chrome_trace).unwrap();
+    let json_string = serde_json::to_string_pretty(&chrome_trace).unwrap();
     let file = File::create("./trace.json").unwrap();
     let mut writer = BufWriter::new(file);
     writer.write_all(json_string.as_bytes()).unwrap();
@@ -136,10 +133,9 @@ fn run() -> Result<Trace, ClError> {
         queue.finish()?;
     }
 
-    const TOTAL_READBACK_BUFFERS: usize = 16;
+    const TOTAL_READBACK_BUFFERS: usize = 3;
     const TOTAL_STEPS: usize = 512;
-    // const RECORD_STRIDE: usize = 32;
-    const RECORD_STRIDE: usize = 1;
+    const RECORD_STRIDE: usize = 32;
     const IS_RECORD: bool = true;
 
     let mut e_field_out_buffers: Vec<Arc<PoolEntry<FieldReadbackBuffer, Option<FieldReadbackData>>>> = vec![];
@@ -194,8 +190,8 @@ fn run() -> Result<Trace, ClError> {
                     evs_copy.push(readback_data.ev_copy);
                     evs_read.push(ev_read);
                     // dump cpu data
-                    // TODO:
-                    // write_npy(format!("./data/E_cpu_{0}.npy", readback_data.curr_iter), &readback_buffer.data_cpu).unwrap();
+                    use ndarray_npy::write_npy;
+                    write_npy(format!("./data/E_cpu_{0}.npy", readback_data.curr_iter), &readback_buffer.data_cpu).unwrap();
                     // mark gpu/cpu readback buffers as available
                     drop(lock_state);
                     e_field_out.signal_free();
