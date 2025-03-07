@@ -20,23 +20,34 @@ use super::{
 };
 
 struct ReadbackBuffer<T> {
+    queue: CommandQueue,
     data_cpu: Vec<T>,
     data_gpu: Buffer<T>,
 }
 
 impl<T: Sized + Default + Clone> ReadbackBuffer<T> {
     fn new(context: &Context, size: usize) -> Result<Self, ClError> {
+        let queue_props = CL_QUEUE_PROFILING_ENABLE;
+        let queue = CommandQueue::create_default(context, queue_props).unwrap();
         let data_cpu: Vec<T> = vec![T::default(); size];
         let data_gpu = unsafe { Buffer::<T>::create(context, CL_MEM_READ_WRITE, size, null_mut::<c_void>()) }?;
         Ok(Self {
+            queue,
             data_cpu,
             data_gpu,
         })
     }
 }
 
+impl<T> Drop for ReadbackBuffer<T> {
+    fn drop(&mut self) {
+        self.queue.finish().unwrap();
+    }
+}
+
 struct ReadbackRequest {
     ev_copy: Event,
+    ev_read: Event,
     curr_iter: usize,
 }
 
@@ -137,7 +148,7 @@ impl App {
             Arc::new(Mutex::new(TraceFieldReadback::default()))
         });
 
-        const TOTAL_READBACK_BUFFERS: usize = 3;
+        const TOTAL_READBACK_BUFFERS: usize = 1;
         let e_field_readback_array = (0..TOTAL_READBACK_BUFFERS)
             .map(|_| Arc::new(Mutex::new(ReadbackBuffer::<f32>::new(&context, total_cells*n_dims).unwrap())))
             .collect();
@@ -244,8 +255,6 @@ impl App {
                 tx_readback_requests.push(tx_readback_request);
                 let buffer_mutex = buffer.clone();
                 let trace_readback = self.gpu_trace.readbacks[thread_id].clone();
-                let queue_props = CL_QUEUE_PROFILING_ENABLE;
-                let queue = CommandQueue::create_default(&self.context, queue_props).unwrap();
                 move || {
                     for data in rx_readback_request {
                         let curr_iter = data.curr_iter;
@@ -253,15 +262,8 @@ impl App {
                         let buffer = &mut *buffer_lock;
                         let total_elems = buffer.data_cpu.len();
 
-                        let ev_read = unsafe {
-                            queue.enqueue_read_buffer(
-                                &buffer.data_gpu,
-                                false as cl_bool, 0, 
-                                buffer.data_cpu.as_mut_slice(),
-                                &[data.ev_copy.get()],
-                            ).unwrap()
-                        };
-                        ev_read.wait().unwrap();
+                        data.ev_copy.wait().unwrap();
+                        data.ev_read.wait().unwrap();
 
                         debug!("Received data from thread={0}, iter={1}, data_size={2}", thread_id, curr_iter, total_elems);
                         {
@@ -271,7 +273,7 @@ impl App {
                         }
 
                         let trace_copy = TraceSpan::from_event(&data.ev_copy, ns_per_tick).unwrap();
-                        let trace_read = TraceSpan::from_event(&ev_read, ns_per_tick).unwrap();
+                        let trace_read = TraceSpan::from_event(&data.ev_read, ns_per_tick).unwrap();
 
                         let mut trace_readback = trace_readback.lock().unwrap();
                         trace_readback.e_field_copy.push(trace_copy);
@@ -280,7 +282,6 @@ impl App {
                         drop(buffer_lock);
                         let _is_main_thread_closed = tx_readback_available.send(thread_id).is_err();
                     }
-                    queue.finish().unwrap();
                 }
             })
         }
@@ -305,23 +306,36 @@ impl App {
         let queue = CommandQueue::create_default(&self.context, queue_props)?;
         let global_timer = Instant::now();
         for curr_iter in 0..TOTAL_STEPS {
+            // TODO: Attempt to synchronise copy/step so that we don't have race condition during copy
             let [ev_update_e_field, ev_update_h_field] = self.simulation.step(&queue, workgroup_size.clone(), &[])?;
             if curr_iter % RECORD_STRIDE == 0 && IS_RECORD {
-                // enqueue gpu to gpu copy and let gpu to cpu happen in readback thread
+                // process results in readback thread
                 if let Ok(thread_id) = rx_readback_available.recv() {
-                    let buffer_mutex = &self.e_field_readback_array[thread_id];
-                    let mut buffer_lock = buffer_mutex.lock().unwrap();
+                    let mut buffer_lock = self.e_field_readback_array[thread_id].lock().unwrap();
                     let buffer = &mut *buffer_lock;
-                    let ev_copy = unsafe { 
-                        queue.enqueue_copy_buffer(
+                    let ev_copy = unsafe {
+                        buffer.queue.enqueue_copy_buffer(
                             &self.simulation.e_field,
                             &mut buffer.data_gpu, 
                             0, 0, buffer.data_cpu.len(),
-                            &[ev_update_h_field.get()]
-                        ) 
+                            &[ev_update_e_field.get()]
+                        )
                     }?;
-                    drop(buffer_lock);
-                    tx_readback_requests[thread_id].send(ReadbackRequest { ev_copy, curr_iter }).unwrap();
+                    let ev_read = unsafe {
+                        buffer.queue.enqueue_read_buffer(
+                            &buffer.data_gpu,
+                            false as cl_bool, 0, 
+                            buffer.data_cpu.as_mut_slice(),
+                            &[ev_copy.get()],
+                        )
+                    }?;
+                    tx_readback_requests[thread_id].send(
+                        ReadbackRequest { 
+                            ev_copy,
+                            ev_read,
+                            curr_iter, 
+                        }
+                    ).unwrap();
                 }
             }
             unsafe { queue.enqueue_barrier_with_wait_list(&[ev_update_h_field.get()]) }?;
