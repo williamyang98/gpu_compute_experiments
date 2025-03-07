@@ -170,7 +170,7 @@ impl App {
         data.e_field.fill(0.0);
         data.h_field.fill(0.0);
         data.e_k.fill(C::E_0);
-        data.mu_k.fill(C::MU_0);
+        data.mu_k = C::MU_0;
         {
             let sigma_0: f32 = 1e8;
             let i = s![0..n_x, 30..90, 30..40];

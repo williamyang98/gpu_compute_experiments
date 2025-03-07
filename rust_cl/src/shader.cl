@@ -44,7 +44,7 @@ __kernel void update_E(
 
 __kernel void update_H(
     __global const float *E, __global float *H,
-    __global const float *B0,
+    float b0,
     int Nx, int Ny, int Nz
 ) {
     // b0 = 1/(mu_k*d_xyz) * dt
@@ -75,7 +75,6 @@ __kernel void update_H(
     const float cEy = dEx_dz-dEz_dx;
     const float cEz = dEy_dx-dEx_dy;
 
-    const float b0 = B0[i0];
     H[i+0] = H[i+0] - b0*cEx;
     H[i+1] = H[i+1] - b0*cEy;
     H[i+2] = H[i+2] - b0*cEz;

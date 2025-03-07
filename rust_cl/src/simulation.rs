@@ -18,12 +18,12 @@ pub struct SimulationCpuData {
     pub h_field: Array4<f32>,
     pub sigma_k: Array3<f32>,
     pub e_k: Array3<f32>,
-    pub mu_k: Array3<f32>,
+    pub mu_k: f32,
     pub dt: f32,
     pub d_xyz: f32,
     pub a0: Array3<f32>,
     pub a1: Array3<f32>,
-    pub b0: Array3<f32>,
+    pub b0: f32,
 }
 
 impl SimulationCpuData {
@@ -37,19 +37,19 @@ impl SimulationCpuData {
             h_field: Array4::<f32>::zeros((n_x, n_y, n_z, n_dims)),
             sigma_k: Array3::<f32>::zeros((n_x, n_y, n_z)),
             e_k: Array3::<f32>::from_elem((n_x, n_y, n_z), C::E_0),
-            mu_k: Array3::<f32>::from_elem((n_x, n_y, n_z), C::MU_0),
+            mu_k: C::MU_0,
             dt: 1e-12,
             d_xyz: 1e-3,
             a0: Array3::<f32>::zeros((n_x, n_y, n_z)),
             a1: Array3::<f32>::zeros((n_x, n_y, n_z)),
-            b0: Array3::<f32>::zeros((n_x, n_y, n_z)),
+            b0: 0.0,
         }
     }
 
     pub fn bake_constants(&mut self) {
         self.a0.assign(&(1.0/(1.0 + &self.sigma_k/&self.e_k * self.dt)));
         self.a1.assign(&(1.0/(&self.e_k * self.d_xyz) * self.dt));
-        self.b0.assign(&(1.0/(&self.mu_k * self.d_xyz) * self.dt));
+        self.b0 = 1.0/(self.mu_k * self.d_xyz) * self.dt;
     }
 }
 
@@ -60,7 +60,7 @@ pub struct Simulation {
     pub h_field: Buffer<f32>,
     pub a0: Buffer<f32>,
     pub a1: Buffer<f32>,
-    pub b0: Buffer<f32>,
+    pub b0: f32,
     pub program_src: &'static str,
     _program: Program,
     kernel_update_e_field: Kernel,
@@ -79,7 +79,7 @@ impl Simulation {
         let h_field = unsafe { Buffer::<f32>::create(context, mem_flags, total_cells*n_dims, host_ptr) }?;
         let a0 = unsafe { Buffer::<f32>::create(context, mem_flags, total_cells, host_ptr) }?;
         let a1 = unsafe { Buffer::<f32>::create(context, mem_flags, total_cells, host_ptr) }?;
-        let b0 = unsafe { Buffer::<f32>::create(context, mem_flags, total_cells, host_ptr) }?;
+        let b0 = 0.0;
 
         let program_src: &'static str = include_str!("./shader.cl");
         let mut program = Program::create_from_source(context, program_src)?;
@@ -107,8 +107,7 @@ impl Simulation {
         let _ = unsafe { queue.enqueue_write_buffer(&mut self.h_field, is_block, 0, data.h_field.as_slice().unwrap(), &[]) }?;
         let _ = unsafe { queue.enqueue_write_buffer(&mut self.a0, is_block, 0, data.a0.as_slice().unwrap(), &[]) }?;
         let _ = unsafe { queue.enqueue_write_buffer(&mut self.a1, is_block, 0, data.a1.as_slice().unwrap(), &[]) }?;
-        let _ = unsafe { queue.enqueue_write_buffer(&mut self.a1, is_block, 0, data.a1.as_slice().unwrap(), &[]) }?;
-        let _ = unsafe { queue.enqueue_write_buffer(&mut self.b0, is_block, 0, data.b0.as_slice().unwrap(), &[]) }?;
+        self.b0 = data.b0;
         Ok(())
     }
 
