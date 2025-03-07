@@ -75,14 +75,14 @@ impl Simulation {
         let host_ptr = null_mut::<c_void>();
         let mem_flags = CL_MEM_READ_WRITE;
 
-        let e_field = unsafe { Buffer::<f32>::create(&context, mem_flags, total_cells*n_dims, host_ptr) }?;
-        let h_field = unsafe { Buffer::<f32>::create(&context, mem_flags, total_cells*n_dims, host_ptr) }?;
-        let a0 = unsafe { Buffer::<f32>::create(&context, mem_flags, total_cells, host_ptr) }?;
-        let a1 = unsafe { Buffer::<f32>::create(&context, mem_flags, total_cells, host_ptr) }?;
-        let b0 = unsafe { Buffer::<f32>::create(&context, mem_flags, total_cells, host_ptr) }?;
+        let e_field = unsafe { Buffer::<f32>::create(context, mem_flags, total_cells*n_dims, host_ptr) }?;
+        let h_field = unsafe { Buffer::<f32>::create(context, mem_flags, total_cells*n_dims, host_ptr) }?;
+        let a0 = unsafe { Buffer::<f32>::create(context, mem_flags, total_cells, host_ptr) }?;
+        let a1 = unsafe { Buffer::<f32>::create(context, mem_flags, total_cells, host_ptr) }?;
+        let b0 = unsafe { Buffer::<f32>::create(context, mem_flags, total_cells, host_ptr) }?;
 
         let program_src: &'static str = include_str!("./shader.cl");
-        let mut program = Program::create_from_source(&context, program_src)?;
+        let mut program = Program::create_from_source(context, program_src)?;
         program.build(context.devices(), "")?;
         let kernel_update_e_field = Kernel::create(&program, "update_E")?;
         let kernel_update_h_field = Kernel::create(&program, "update_H")?;
@@ -122,7 +122,7 @@ impl Simulation {
         unsafe {
             // e-field update
             let ev_update_e_field = ExecuteKernel::new(&self.kernel_update_e_field)
-                .set_arg(&mut self.e_field)
+                .set_arg(&self.e_field)
                 .set_arg(&self.h_field)
                 .set_arg(&self.a0)
                 .set_arg(&self.a1)
@@ -131,12 +131,12 @@ impl Simulation {
                 .set_arg(&(n_z as i32))
                 .set_global_work_sizes(global_size.as_slice().unwrap())
                 .set_local_work_sizes(workgroup_size.as_slice().unwrap())
-                .set_event_wait_list(&wait_events)
-                .enqueue_nd_range(&queue)?;
+                .set_event_wait_list(wait_events)
+                .enqueue_nd_range(queue)?;
             // h-field update
             let ev_update_h_field = ExecuteKernel::new(&self.kernel_update_h_field)
                 .set_arg(&self.e_field)
-                .set_arg(&mut self.h_field)
+                .set_arg(&self.h_field)
                 .set_arg(&self.b0)
                 .set_arg(&(n_x as i32))
                 .set_arg(&(n_y as i32))
@@ -144,7 +144,7 @@ impl Simulation {
                 .set_global_work_sizes(global_size.as_slice().unwrap())
                 .set_local_work_sizes(workgroup_size.as_slice().unwrap())
                 .set_event_wait_list(&[ev_update_e_field.get()])
-                .enqueue_nd_range(&queue)?;
+                .enqueue_nd_range(queue)?;
             Ok([ev_update_e_field, ev_update_h_field])
         }
     }

@@ -1,24 +1,19 @@
-use std::{ffi::c_void, ptr::null_mut};
-use std::sync::Arc;
-use std::time::{Instant, Duration};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use opencl3::{
     command_queue::{CommandQueue, CL_QUEUE_PROFILING_ENABLE}, 
     context::Context, device::Device, 
     error_codes::ClError, 
     event::Event,
-    memory::{Buffer, CL_MEM_READ_WRITE},
     platform::get_platforms, 
-    types::cl_bool,
 };
-use ndarray::{Array1, Array4, s};
+use ndarray::{Array1,ArrayView4, s};
 use ytdlp_server::{
     simulation::{Simulation, SimulationCpuData},
     constants as C,
-    pool::{PoolChannel, PoolEntry},
     chrome_trace::{TraceSpan, Trace, TraceEvent},
-    readback::{TraceFieldReadback, FieldReadbackBuffer, FieldReadbackData, FieldReadbackBufferArray},
+    readback::{ReadbackData, ReadbackBufferArray},
 };
-use std::thread::JoinHandle;
 use std::io::{BufWriter, Write};
 use std::fs::File;
 
@@ -36,6 +31,12 @@ fn main() -> Result<(), String> {
 struct TraceGridStep {
     gpu_update_e_field: Vec<TraceSpan>,
     gpu_update_h_field: Vec<TraceSpan>,
+}
+
+#[derive(Default)]
+pub struct TraceFieldReadback {
+    gpu_copy: Vec<TraceSpan>,
+    gpu_read: Vec<TraceSpan>,
 }
 
 fn run() -> Result<Trace, ClError> {
@@ -63,6 +64,9 @@ fn run() -> Result<Trace, ClError> {
 
     let ns_per_tick: u64 = device.profiling_timer_resolution()? as u64;
     let grid_size = Array1::from(vec![16, 256, 512]);
+    let n_dims = 3;
+    let (n_x, n_y, n_z) = (grid_size[0], grid_size[1], grid_size[2]);
+    let total_cells: usize = grid_size.iter().product();
 
     let mut simulation_data = SimulationCpuData::new(grid_size.clone());
     init_simulation_data(&mut simulation_data);
@@ -80,7 +84,28 @@ fn run() -> Result<Trace, ClError> {
     const RECORD_STRIDE: usize = 32;
     const IS_RECORD: bool = true;
 
-    let mut e_field_readback_array = FieldReadbackBufferArray::new(context.clone(), grid_size.clone(), TOTAL_READBACK_BUFFERS)?;
+    let mut trace_readback: Vec<TraceFieldReadback> = vec![];
+    trace_readback.resize_with(TOTAL_READBACK_BUFFERS, TraceFieldReadback::default);
+    let trace_readback = Arc::new(Mutex::new(trace_readback));
+    let handler = {
+        let trace_readback = trace_readback.clone();
+        move |ev_copy: Event, ev_read: Event, thread_id: usize, curr_iter: usize, data: &[f32]| {
+            println!("Received data from thread={0}, iter={1}, data_size={2}", thread_id, curr_iter, data.len());
+            use ndarray_npy::write_npy;
+            let data = ArrayView4::from_shape((n_x,n_y,n_z,n_dims), data).unwrap();
+            write_npy(format!("./data/E_cpu_{0}.npy", curr_iter), &data).unwrap();
+
+            let trace_copy = TraceSpan::from_event(&ev_copy, ns_per_tick).unwrap();
+            let trace_read = TraceSpan::from_event(&ev_read, ns_per_tick).unwrap();
+
+            let mut trace_readback = trace_readback.lock().unwrap();
+            let trace = &mut trace_readback[thread_id];
+            trace.gpu_copy.push(trace_copy);
+            trace.gpu_read.push(trace_read);
+        }
+    };
+    let mut e_field_readback_array = ReadbackBufferArray::<f32>::new(context.clone(), total_cells*n_dims, TOTAL_READBACK_BUFFERS, Some(handler))?;
+
     let mut evs_update_e_field: Vec<Event> = vec![];
     let mut evs_update_h_field: Vec<Event> = vec![];
     evs_update_e_field.reserve(TOTAL_STEPS);
@@ -96,20 +121,18 @@ fn run() -> Result<Trace, ClError> {
         // let queue_props = 0;
         let queue_props = CL_QUEUE_PROFILING_ENABLE;
         let queue = CommandQueue::create_default(&context, queue_props)?;
-        let mut e_field_out_index: usize = 0;
 
-        let mut trace_loop = TraceSpan::default();
-        trace_loop.start = global_timer.elapsed();
+        let mut trace_loop = TraceSpan::new(global_timer.elapsed());
         for curr_iter in 0..TOTAL_STEPS {
             let [ev_update_e_field, ev_update_h_field] = simulation.step(&queue, workgroup_size.clone(), &[])?;
             if curr_iter % RECORD_STRIDE == 0 && IS_RECORD {
                 // grab available buffer
-                let mut buffer = e_field_readback_array.get_free_buffer();
+                let buffer = e_field_readback_array.get_free_buffer();
                 // readback on gpu
                 let mut readback_buffer = buffer.value.lock().unwrap();
                 let size = readback_buffer.data_cpu.len();
                 let ev_copy = unsafe { queue.enqueue_copy_buffer(&simulation.e_field, &mut readback_buffer.data_gpu, 0, 0, size, &[ev_update_h_field.get()]) }?;
-                buffer.signal_pending(Some(FieldReadbackData { ev_copy, curr_iter }));
+                buffer.signal_pending(Some(ReadbackData { ev_copy, curr_iter }));
             }
             unsafe { queue.enqueue_barrier_with_wait_list(&[ev_update_h_field.get()]) }?;
 
@@ -144,9 +167,29 @@ fn run() -> Result<Trace, ClError> {
     );
 
     let mut chrome_trace = Trace::default();
-    chrome_trace.events.extend(e_field_readback_array.get_chrome_trace_events());
-
     {
+        for (thread_id, trace_readback) in trace_readback.lock().unwrap().iter().enumerate() {
+            for span in trace_readback.gpu_copy.iter() {
+                chrome_trace.events.push(TraceEvent {
+                    name: "copy".to_owned(),
+                    process_id: 0,
+                    thread_id: thread_id as u64 + 1,
+                    us_start: span.start.as_micros(),
+                    us_duration: span.elapsed().as_micros(),
+                    category: "X".to_owned(),
+                })
+            }
+            for span in trace_readback.gpu_read.iter() {
+                chrome_trace.events.push(TraceEvent {
+                    name: "read".to_owned(),
+                    process_id: 0,
+                    thread_id: thread_id as u64 + 1,
+                    us_start: span.start.as_micros(),
+                    us_duration: span.elapsed().as_micros(),
+                    category: "X".to_owned(),
+                })
+            }
+        }
         for span in trace_grid_step.gpu_update_e_field.iter() {
             chrome_trace.events.push(TraceEvent {
                 name: "update_e".to_owned(),

@@ -12,6 +12,13 @@ pub struct TraceSpan {
 }
 
 impl TraceSpan {
+    pub fn new(start: Duration) -> Self {
+        Self {
+            start,
+            end: start,
+        }
+    }
+
     pub fn elapsed(&self) -> Duration {
         self.end - self.start
     }
