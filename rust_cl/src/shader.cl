@@ -1,3 +1,23 @@
+__kernel void update_current_source(
+    __global float *E, const float E0,
+    int Nx, int Ny, int Nz
+) {
+    const int ix = get_global_id(0);
+    const int iy = get_global_id(1);
+    const int iz = get_global_id(2);
+
+    if (ix >= Nx) return;
+    if (iy >= Ny) return;
+    if (iz >= Nz) return;
+
+    const int n_dims = 3;
+    const int Nzy = Nz*Ny;
+    const int i0 = iz + iy*Nz + ix*Nzy;
+    const int i = n_dims*i0;
+
+    E[i+0] += E0;
+}
+
 __kernel void update_E(
     __global float *E, __global const float *H,
     __global const float *A0, __global const float *A1,

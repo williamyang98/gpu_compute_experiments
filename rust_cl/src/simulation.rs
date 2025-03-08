@@ -65,6 +65,7 @@ pub struct Simulation {
     pub b0: f32,
     pub program_src: String,
     _program: Program,
+    kernel_update_current_source: Kernel,
     kernel_update_e_field: Kernel,
     kernel_update_h_field: Kernel,
 }
@@ -99,6 +100,7 @@ impl Simulation {
             }
             return Err(err);
         };
+        let kernel_update_current_source = Kernel::create(&program, "update_current_source")?;
         let kernel_update_e_field = Kernel::create(&program, "update_E")?;
         let kernel_update_h_field = Kernel::create(&program, "update_H")?;
 
@@ -111,6 +113,7 @@ impl Simulation {
             b0,
             program_src,
             _program: program,
+            kernel_update_current_source,
             kernel_update_e_field,
             kernel_update_h_field,
         })
@@ -124,6 +127,29 @@ impl Simulation {
         let _ = unsafe { queue.enqueue_write_buffer(&mut self.a1, is_block, 0, data.a1.as_slice().unwrap(), &[]) }?;
         self.b0 = data.b0;
         Ok(())
+    }
+
+    pub fn apply_voltage_source(&mut self, queue: &CommandQueue, value: f32, wait_events: &[cl_event]) -> Result<Event, ClError> {
+
+        let (n_x, n_y, n_z) = (self.grid_size[0], self.grid_size[1], self.grid_size[2]);
+        // TODO: make this user defineable
+        unsafe {
+            let border: usize = 20;
+            let width: usize = 12;
+            let height: usize = 3;
+            let ev_update_current_source = ExecuteKernel::new(&self.kernel_update_current_source)
+                .set_arg(&self.e_field)
+                .set_arg(&value)
+                .set_arg(&(n_x as i32))
+                .set_arg(&(n_y as i32))
+                .set_arg(&(n_z as i32))
+                .set_global_work_offsets(&[7, n_y/2-width/2, n_z/2])
+                .set_global_work_sizes(&[height,width,1])
+                .set_local_work_sizes(&[height,width,1])
+                .set_event_wait_list(wait_events)
+                .enqueue_nd_range(queue)?;
+            Ok(ev_update_current_source)
+        }
     }
 
     pub fn step(&mut self, queue: &CommandQueue, workgroup_size: Array1<usize>, wait_events: &[cl_event]) -> Result<[Event; 2], ClError> {

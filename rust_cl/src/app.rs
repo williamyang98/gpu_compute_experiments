@@ -51,6 +51,11 @@ struct ReadbackRequest {
     curr_iter: usize,
 }
 
+enum SimulationEvent {
+    ApplySignal { event: Event, curr_iter: usize },
+    Step { update_e_field: Event, update_h_field: Event, curr_iter: usize },
+}
+
 #[derive(Default)]
 pub struct TraceFieldReadback {
     pub e_field_copy: Vec<TraceSpan>,
@@ -59,6 +64,7 @@ pub struct TraceFieldReadback {
 
 #[derive(Default)]
 pub struct TraceSimulationStep {
+    pub apply_signal: Vec<TraceSpan>,
     pub update_e_field: Vec<TraceSpan>,
     pub update_h_field: Vec<TraceSpan>,
 }
@@ -79,8 +85,8 @@ impl AppGpuTrace {
                     name: "copy".to_owned(),
                     process_id: 0,
                     thread_id: thread_id as u64 + 1,
-                    us_start: span.start.as_micros(),
-                    us_duration: span.elapsed().as_micros(),
+                    us_start: span.start.as_nanos(),
+                    us_duration: span.elapsed().as_nanos(),
                     category: "X".to_owned(),
                 })
             }
@@ -89,21 +95,31 @@ impl AppGpuTrace {
                     name: "read".to_owned(),
                     process_id: 0,
                     thread_id: thread_id as u64 + 1,
-                    us_start: span.start.as_micros(),
-                    us_duration: span.elapsed().as_micros(),
+                    us_start: span.start.as_nanos(),
+                    us_duration: span.elapsed().as_nanos(),
                     category: "X".to_owned(),
                 })
             }
         }
 
         let steps = self.steps.lock().unwrap();
+        for span in steps.apply_signal.iter() {
+            events.push(TraceEvent {
+                name: "apply_signal".to_owned(),
+                process_id: 0,
+                thread_id: 0,
+                us_start: span.start.as_nanos(),
+                us_duration: span.elapsed().as_nanos(),
+                category: "X".to_owned(),
+            });
+        }
         for span in steps.update_e_field.iter() {
             events.push(TraceEvent {
                 name: "update_e".to_owned(),
                 process_id: 0,
                 thread_id: 0,
-                us_start: span.start.as_micros(),
-                us_duration: span.elapsed().as_micros(),
+                us_start: span.start.as_nanos(),
+                us_duration: span.elapsed().as_nanos(),
                 category: "X".to_owned(),
             });
         }
@@ -112,8 +128,8 @@ impl AppGpuTrace {
                 name: "update_h".to_owned(),
                 process_id: 0,
                 thread_id: 0,
-                us_start: span.start.as_micros(),
-                us_duration: span.elapsed().as_micros(),
+                us_start: span.start.as_nanos(),
+                us_duration: span.elapsed().as_nanos(),
                 category: "X".to_owned(),
             });
         }
@@ -172,8 +188,8 @@ impl App {
         let data = &mut self.cpu_data;
         let grid_size = &data.grid_size;
         let (n_x, n_y, n_z) = (grid_size[0], grid_size[1], grid_size[2]);
-        let d_xyz: f32 = 1e-3;
-        let dt: f32 = 1e-12;
+        let d_xyz: f32 = 1e-5;
+        let dt: f32 = 1e-14;
 
         data.d_xyz = d_xyz;
         data.dt = dt;
@@ -182,27 +198,30 @@ impl App {
         data.h_field.fill(0.0);
         data.e_k.fill(C::E_0);
         data.mu_k = C::MU_0;
-        {
+
+        // 16,256,512
+
+        // add conductors
+        if true {
             let sigma_0: f32 = 1e8;
-            let i = s![0..n_x, 30..90, 30..40];
+            // ground plane
+            let border: usize = 20;
+            let i = s![3..=6, border..n_y-border, border..n_z-border];
+            data.sigma_k.slice_mut(i).fill(sigma_0);
+            // transmission line
+            let width: usize = 20;
+            let center = n_y/2;
+            let i = s![10..=13, center-width/2..center+width/2, border*2..n_z-border*2];
+            // let i = s![14..=15, border..n_y-border, border..n_z-border];
             data.sigma_k.slice_mut(i).fill(sigma_0);
         }
 
-        {
-            let w: usize = 10;
-            let a: Array1<f32> = ndarray::linspace(0.0, 2.0*C::PI, w*2).collect();
-            // hann window
-            let a = 0.53836 - 0.46164*a.cos();
-            let c = n_z/2;
-            let i = s![5..=6,0..n_y,c-w..c+w,0];
-            data.e_field
-                .slice_mut(i)
-                .axis_iter_mut(ndarray::Axis(1))
-                .for_each(|mut row| row.assign(&a));
-            data.h_field
-                .slice_mut(i)
-                .axis_iter_mut(ndarray::Axis(1))
-                .for_each(|mut row| row.assign(&a));
+        // add dielectric
+        if true {
+            let border: usize = 20;
+            let e_k = C::E_0*4.1;
+            let i = s![4..=12, border..n_y-border, border..n_z-border];
+            data.e_k.slice_mut(i).fill(e_k);
         }
 
         data.bake_constants();
@@ -225,20 +244,30 @@ impl App {
         let (n_x, n_y, n_z) = (grid_size[0], grid_size[1], grid_size[2]);
 
         // convert step events to trace points
-        let (tx_step_events, rx_step_events) = bounded::<(Event, Event)>(128);
+        let (tx_step_events, rx_step_events) = bounded::<SimulationEvent>(128);
         self.thread_pool.execute({
             let trace = self.gpu_trace.steps.clone();
             move || {
-                for (ev_update_e_field, ev_update_h_field) in rx_step_events {
-                    ev_update_e_field.wait().unwrap();
-                    ev_update_h_field.wait().unwrap();
+                for event in rx_step_events {
+                    match event {
+                        SimulationEvent::ApplySignal { event, curr_iter }  => {
+                            event.wait().unwrap();
+                            let trace_event = TraceSpan::from_event(&event, ns_per_tick).unwrap();
+                            let mut trace = trace.lock().unwrap();
+                            trace.apply_signal.push(trace_event);
+                        },
+                        SimulationEvent::Step { update_e_field, update_h_field, curr_iter } => {
+                            update_e_field.wait().unwrap();
+                            update_h_field.wait().unwrap();
 
-                    let trace_update_e_field = TraceSpan::from_event(&ev_update_e_field, ns_per_tick).unwrap();
-                    let trace_update_h_field = TraceSpan::from_event(&ev_update_h_field, ns_per_tick).unwrap();
+                            let trace_update_e_field = TraceSpan::from_event(&update_e_field, ns_per_tick).unwrap();
+                            let trace_update_h_field = TraceSpan::from_event(&update_h_field, ns_per_tick).unwrap();
 
-                    let mut trace = trace.lock().unwrap();
-                    trace.update_e_field.push(trace_update_e_field);
-                    trace.update_h_field.push(trace_update_h_field);
+                            let mut trace = trace.lock().unwrap();
+                            trace.update_e_field.push(trace_update_e_field);
+                            trace.update_h_field.push(trace_update_h_field);
+                        },
+                    }
                 }
             }
         });
@@ -297,11 +326,24 @@ impl App {
         let total_workgroup_size: usize = workgroup_size.iter().product();
         assert!(total_workgroup_size <= max_workgroup_threads);
 
+        let signal_length: usize = 256;
+        let mut signal = Array1::<f32>::zeros(signal_length);
+        for (i, v) in signal.iter_mut().enumerate() {
+            let dt = 3.1415*(i as f32)/((signal_length-1) as f32);
+            let a = dt.sin();
+            *v = a*a;
+        }
+
         // let queue_props = 0;
         let queue_props = CL_QUEUE_PROFILING_ENABLE;
         let queue = CommandQueue::create_default(&self.context, queue_props)?;
         let global_timer = Instant::now();
         for curr_iter in 0..total_steps {
+            if let Some(value) = signal.get(curr_iter) {
+                let ev = self.simulation.apply_voltage_source(&queue, *value, &[])?;
+                unsafe { queue.enqueue_barrier_with_wait_list(&[ev.get()]) }?;
+                tx_step_events.send(SimulationEvent::ApplySignal { event: ev, curr_iter }).unwrap();
+            }
             // TODO: Attempt to synchronise copy/step so that we don't have race condition during copy
             let [ev_update_e_field, ev_update_h_field] = self.simulation.step(&queue, workgroup_size.clone(), &[])?;
             let is_record = record_stride.map(|stride| curr_iter % stride == 0).unwrap_or(false);
@@ -310,14 +352,17 @@ impl App {
                 if let Ok(thread_id) = rx_readback_available.recv() {
                     let mut buffer_lock = self.e_field_readback_array[thread_id].lock().unwrap();
                     let buffer = &mut *buffer_lock;
+                    // copy gpu to gpu on separate context
                     let ev_copy = unsafe {
                         buffer.queue.enqueue_copy_buffer(
                             &self.simulation.e_field,
                             &mut buffer.data_gpu, 
-                            0, 0, buffer.data_cpu.len(),
+                            0, 0, buffer.data_cpu.len() * std::mem::size_of::<f32>(),
                             &[ev_update_e_field.get()]
                         )
                     }?;
+                    unsafe { queue.enqueue_barrier_with_wait_list(&[ev_copy.get(), ev_update_h_field.get()]) }?;
+                    // copy gpu to cpu on separate context
                     let ev_read = unsafe {
                         buffer.queue.enqueue_read_buffer(
                             &buffer.data_gpu,
@@ -326,17 +371,23 @@ impl App {
                             &[ev_copy.get()],
                         )
                     }?;
+                    unsafe { buffer.queue.enqueue_barrier_with_wait_list(&[ev_read.get()]) }?;
                     tx_readback_requests[thread_id].send(
-                        ReadbackRequest { 
+                        ReadbackRequest {
                             ev_copy,
                             ev_read,
-                            curr_iter, 
+                            curr_iter,
                         }
                     ).unwrap();
                 }
+            } else {
+                unsafe { queue.enqueue_barrier_with_wait_list(&[ev_update_h_field.get()]) }?;
             }
-            unsafe { queue.enqueue_barrier_with_wait_list(&[ev_update_h_field.get()]) }?;
-            tx_step_events.send((ev_update_e_field, ev_update_h_field)).unwrap();
+            tx_step_events.send(SimulationEvent::Step {
+                update_e_field: ev_update_e_field, 
+                update_h_field: ev_update_h_field,
+                curr_iter
+            }).unwrap();
             queue.flush()?;
         }
         queue.finish()?;
