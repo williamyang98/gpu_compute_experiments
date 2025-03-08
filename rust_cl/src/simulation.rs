@@ -1,6 +1,8 @@
 use std::{ffi::c_void, ptr::null_mut};
+use log::error;
 use opencl3::{
     command_queue::CommandQueue, 
+    device::Device,
     context::Context,
     error_codes::ClError, 
     event::Event,
@@ -61,7 +63,7 @@ pub struct Simulation {
     pub a0: Buffer<f32>,
     pub a1: Buffer<f32>,
     pub b0: f32,
-    pub program_src: &'static str,
+    pub program_src: String,
     _program: Program,
     kernel_update_e_field: Kernel,
     kernel_update_h_field: Kernel,
@@ -81,9 +83,22 @@ impl Simulation {
         let a1 = unsafe { Buffer::<f32>::create(context, mem_flags, total_cells, host_ptr) }?;
         let b0 = 0.0;
 
-        let program_src: &'static str = include_str!("./shader.cl");
-        let mut program = Program::create_from_source(context, program_src)?;
-        program.build(context.devices(), "")?;
+        // let program_src: &'static str = include_str!("./shader.cl");
+        let program_src = std::fs::read_to_string("./src/shader.cl").expect("Shader file should exist");
+        let mut program = Program::create_from_source(context, program_src.as_str())?;
+        if let Err(err) = program.build(context.devices(), "") {
+            error!("Program failed to build with error={0}", err.to_string());
+            for &device_id in context.devices() {
+                let status = program.get_build_status(device_id)?;
+                let log = program.get_build_log(device_id)?;
+                let device = Device::new(device_id);
+                error!("build log for device={0}, status={1}\n{2}",
+                    device.name().unwrap_or("?".to_owned()),
+                    status, &log,
+                );
+            }
+            return Err(err);
+        };
         let kernel_update_e_field = Kernel::create(&program, "update_E")?;
         let kernel_update_h_field = Kernel::create(&program, "update_H")?;
 

@@ -216,7 +216,7 @@ impl App {
         Ok(())
     }
  
-    pub fn run(&mut self) -> Result<(), ClError> {
+    pub fn run(&mut self, total_steps: usize, record_stride: Option<usize>) -> Result<(), ClError> {
         let grid_size = &self.grid_size;
         let total_cells: usize = grid_size.iter().product();
 
@@ -291,10 +291,6 @@ impl App {
         }
         drop(tx_readback_available);
 
-        const TOTAL_STEPS: usize = 2048;
-        const RECORD_STRIDE: usize = 32;
-        const IS_RECORD: bool = true;
-
         // calculate workgroup size and global size for program
         let max_workgroup_threads: usize = self.device.max_work_group_size()?;
         let workgroup_size = Array1::from(vec![1, 1, 256]);
@@ -305,10 +301,11 @@ impl App {
         let queue_props = CL_QUEUE_PROFILING_ENABLE;
         let queue = CommandQueue::create_default(&self.context, queue_props)?;
         let global_timer = Instant::now();
-        for curr_iter in 0..TOTAL_STEPS {
+        for curr_iter in 0..total_steps {
             // TODO: Attempt to synchronise copy/step so that we don't have race condition during copy
             let [ev_update_e_field, ev_update_h_field] = self.simulation.step(&queue, workgroup_size.clone(), &[])?;
-            if curr_iter % RECORD_STRIDE == 0 && IS_RECORD {
+            let is_record = record_stride.map(|stride| curr_iter % stride == 0).unwrap_or(false);
+            if is_record {
                 // process results in readback thread
                 if let Ok(thread_id) = rx_readback_available.recv() {
                     let mut buffer_lock = self.e_field_readback_array[thread_id].lock().unwrap();
@@ -346,9 +343,9 @@ impl App {
         // benchmark performance
         let elapsed = global_timer.elapsed();
         let elapsed_secs: f64 = (elapsed.as_nanos() as f64)*1e-9;
-        let cell_rate = ((total_cells * TOTAL_STEPS) as f64)/elapsed_secs * 1e-6;
+        let cell_rate = ((total_cells * total_steps) as f64)/elapsed_secs * 1e-6;
         info!("total_cells={0}", total_cells);
-        info!("total_loops={0}", TOTAL_STEPS);
+        info!("total_loops={0}", total_steps);
         info!("cell_rate={0:.3} M/s", cell_rate);
 
         drop(tx_step_events);

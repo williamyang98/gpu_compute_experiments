@@ -28,6 +28,12 @@ struct Args {
     /// List devices
     #[arg(long)]
     list_devices: bool,
+    /// Total simulation steps
+    #[arg(long, default_value_t = 2048)]
+    total_steps: usize,
+    /// Record stride
+    #[arg(long)]
+    record_stride: Option<usize>,
 }
 
 fn list_platforms(platforms: &[Platform]) {
@@ -116,7 +122,7 @@ fn main() -> Result<(), String> {
     let mut app = App::new(device).map_err(|err| err.to_string())?;
     app.init_simulation_data();
     app.upload_simulation_data().map_err(|err| err.to_string())?;
-    app.run()?;
+    app.run(args.total_steps, args.record_stride)?;
 
     let app_events = app.gpu_trace.get_chrome_events();
     let chrome_trace = Trace { events: app_events };
