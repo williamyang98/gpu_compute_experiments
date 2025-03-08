@@ -17,6 +17,7 @@ threadpool = { version = "1.8.1" }
 log = { version = "0.4.26" }
 env_logger = { version = "0.10", features = ["auto-color", "humantime"] }
 crossbeam-channel = { version = "0.5.14" }
+prettytable-rs = { version = "0.10.0" }
 
 # dashmap = { version = "6.0.1" }
 # derive_more = { version = "0.99.18" }
