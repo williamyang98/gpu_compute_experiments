@@ -7,8 +7,7 @@ use opencl3::{
 };
 use ytdlp_server::{
     chrome_trace::Trace,
-    app::App,
-    gui::UserEvent,
+    app::{App, UserEvent},
     window::MainWindow,
 };
 use std::io::{BufWriter, Write};

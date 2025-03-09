@@ -12,15 +12,19 @@ use opencl3::{
     types::cl_bool,
     memory::{Buffer, CL_MEM_READ_WRITE},
 };
-use ndarray::{Array1,ArrayView4, s};
+use ndarray::{Array1,ArrayView4,Array4,s};
 use super::{
     simulation::{Simulation, SimulationCpuData},
     constants as C,
     chrome_trace::{TraceSpan, TraceEvent},
-    gui::UserEvent,
 };
 
-struct ReadbackBuffer<T> {
+pub enum UserEvent {
+    SetProgress { curr_step: usize, total_steps: usize },
+    GridDownload { data: Arc<Mutex<Array4<f32>>>, thread_id: usize, curr_iter: usize },
+}
+
+pub struct ReadbackBuffer<T> {
     queue: CommandQueue,
     data_cpu: Vec<T>,
     data_gpu: Buffer<T>,
@@ -162,11 +166,11 @@ impl App {
         let simulation = Simulation::new(grid_size.clone(), &context)?;
 
         let mut gpu_trace = AppGpuTrace::default();
+        const TOTAL_READBACK_BUFFERS: usize = 3;
         gpu_trace.readbacks.resize_with(TOTAL_READBACK_BUFFERS, || {
             Arc::new(Mutex::new(TraceFieldReadback::default()))
         });
 
-        const TOTAL_READBACK_BUFFERS: usize = 1;
         let e_field_readback_array = (0..TOTAL_READBACK_BUFFERS)
             .map(|_| Arc::new(Mutex::new(ReadbackBuffer::<f32>::new(&context, total_cells*n_dims).unwrap())))
             .collect();
@@ -287,21 +291,32 @@ impl App {
                 tx_readback_requests.push(tx_readback_request);
                 let buffer_mutex = buffer.clone();
                 let trace_readback = self.gpu_trace.readbacks[thread_id].clone();
+
+                let grid_shape = (n_x,n_y,n_z,n_dims);
+                let grid_data = Arc::new(Mutex::new(Array4::<f32>::zeros(grid_shape)));
+
+                let user_events = self.user_events.clone();
                 move || {
                     for data in rx_readback_request {
+                        data.ev_copy.wait().unwrap();
+                        data.ev_read.wait().unwrap();
+
                         let curr_iter = data.curr_iter;
                         let mut buffer_lock = buffer_mutex.lock().unwrap();
                         let buffer = &mut *buffer_lock;
                         let total_elems = buffer.data_cpu.len();
 
-                        data.ev_copy.wait().unwrap();
-                        data.ev_read.wait().unwrap();
-
                         debug!("Received data from thread={0}, iter={1}, data_size={2}", thread_id, curr_iter, total_elems);
                         {
-                            use ndarray_npy::write_npy;
-                            let data = ArrayView4::from_shape((n_x,n_y,n_z,n_dims), buffer.data_cpu.as_slice()).unwrap();
-                            write_npy(format!("./data/E_cpu_{0}.npy", curr_iter), &data).unwrap();
+                            let grid_view = ArrayView4::from_shape(grid_shape, buffer.data_cpu.as_slice()).unwrap();
+                            grid_data.lock().unwrap().assign(&grid_view);
+                            let _ = user_events.send(UserEvent::GridDownload { 
+                                data: grid_data.clone(),
+                                thread_id,
+                                curr_iter: data.curr_iter,
+                            });
+                            // use ndarray_npy::write_npy;
+                            // write_npy(format!("./data/E_cpu_{0}.npy", curr_iter), &data).unwrap();
                         }
 
                         let trace_copy = TraceSpan::from_event(&data.ev_copy, ns_per_tick).unwrap();
@@ -347,7 +362,6 @@ impl App {
                 unsafe { queue.enqueue_barrier_with_wait_list(&[ev.get()]) }?;
                 tx_step_events.send(SimulationEvent::ApplySignal { event: ev, curr_iter }).unwrap();
             }
-            // TODO: Attempt to synchronise copy/step so that we don't have race condition during copy
             let [ev_update_e_field, ev_update_h_field] = self.simulation.step(&queue, workgroup_size.clone(), &[])?;
             let is_record = record_stride.map(|stride| curr_iter % stride == 0).unwrap_or(false);
             if is_record {
@@ -364,6 +378,8 @@ impl App {
                             &[ev_update_e_field.get()]
                         )
                     }?;
+                    // TODO: Attempt to synchronise copy/step so that we don't have race condition during copy
+                    //       Can we do this in a better way without stalling main thread??
                     unsafe { queue.enqueue_barrier_with_wait_list(&[ev_copy.get(), ev_update_h_field.get()]) }?;
                     // copy gpu to cpu on separate context
                     let ev_read = unsafe {
@@ -415,3 +431,4 @@ impl App {
         Ok(())
     }
 }
+

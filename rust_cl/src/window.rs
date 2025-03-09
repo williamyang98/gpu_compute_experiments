@@ -1,6 +1,9 @@
 use log::{info, error, debug};
 use std::sync::Arc;
-use super::gui::{UserEvent, AppGui};
+use super::{
+    gui::AppGui,
+    app::UserEvent,
+};
 
 struct WgpuWindow {
     window: Arc<winit::window::Window>,
@@ -91,14 +94,14 @@ impl WgpuWindow {
         }
     }
 
-    fn on_redraw_requested(&mut self, render_call: impl FnOnce(&mut egui::Ui)) {
+    fn on_redraw_requested(&mut self, render_call: impl FnOnce(&egui::Context)) {
         self.is_redraw_requested = false;
 
         // egui tessellation
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let context = self.egui_state.egui_ctx();
         context.begin_pass(raw_input);
-        egui::CentralPanel::default().show(context, render_call);
+        render_call(context);
         let full_output = context.end_pass();
         let paint_jobs = context.tessellate(full_output.shapes, full_output.pixels_per_point);
 
@@ -193,7 +196,7 @@ impl winit::application::ApplicationHandler<UserEvent> for MainWindow {
                 info!("Closing winit window");
                 event_loop.exit();
             },
-            WindowEvent::RedrawRequested => window.on_redraw_requested(|ui| self.gui.render(ui)),
+            WindowEvent::RedrawRequested => window.on_redraw_requested(|ctx| self.gui.render(ctx)),
             WindowEvent::Resized(size) => window.on_resize(size.width, size.height),
             event => debug!("Unhandled window event: {0:?}", event),
         }
