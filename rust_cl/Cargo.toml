@@ -22,10 +22,12 @@ prettytable-rs = { version = "0.10.0" }
 bytemuck = { version = "1.18" }
 egui = { version = "0.31.1", features = ["bytemuck"] }
 pollster = { version = "0.3.0" }
-wgpu = { version = "24.0.0" }
+glow = { version = "0.16" }
 winit = { version = "0.30.7" }
 egui-winit = { version = "0.31.1" }
-egui-wgpu = { version = "0.31.1", features = ["winit"] }
+egui_glow = { version = "0.31.1", features = ["winit"] }
+glutin = { version = "0.32.0" }
+glutin-winit = { version = "0.5.0" }
 
 # dashmap = { version = "6.0.1" }
 # derive_more = { version = "0.99.18" }
