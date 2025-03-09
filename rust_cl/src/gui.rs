@@ -1,7 +1,6 @@
 use ndarray::{Array1, Array4};
 use std::sync::{Arc, Mutex};
 use super::app::UserEvent;
-use log::{info};
 
 pub struct AppGui {
     name: String,
@@ -26,7 +25,7 @@ impl AppGui {
         }
     }
 
-    pub fn render(&mut self, context: &egui::Context) {
+    pub fn render(&mut self, context: &egui::Context, gl: &glow::Context) {
         egui::CentralPanel::default().show(context, |ui| {
             ui.heading("My egui Application");
             ui.horizontal(|ui| {
@@ -55,7 +54,7 @@ impl AppGui {
         });
     }
 
-    pub fn handle_user_event(&mut self, event: UserEvent) -> bool {
+    pub fn handle_user_event(&mut self, event: UserEvent, gl: &glow::Context) -> bool {
         match event {
             UserEvent::SetProgress { curr_step, total_steps } => {
                 self.curr_step = curr_step;
@@ -69,7 +68,7 @@ impl AppGui {
                 self.grid_data_iter = curr_iter;
                 let buffer = data.lock().unwrap();
                 if self.grid_data.shape() != buffer.shape() {
-                    info!("Resizing ui grid buffer to {0:?}", buffer.shape());
+                    log::info!("Resizing ui grid buffer to {0:?}", buffer.shape());
                     self.grid_data = buffer.clone();
                 } else {
                     self.grid_data.assign(&buffer);

@@ -1,4 +1,3 @@
-use log::{info, debug};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use std::{ffi::c_void, ptr::null_mut};
@@ -235,7 +234,7 @@ impl App {
     }
 
     pub fn upload_simulation_data(&mut self) -> Result<(), ClError> {
-        debug!("Uploading initial simulation conditions");
+        log::debug!("Uploading initial simulation conditions");
         let queue = CommandQueue::create_default(&self.context, 0)?;
         self.simulation.upload_data(&queue, &self.cpu_data)?;
         queue.finish()?;
@@ -306,7 +305,7 @@ impl App {
                         let buffer = &mut *buffer_lock;
                         let total_elems = buffer.data_cpu.len();
 
-                        debug!("Received data from thread={0}, iter={1}, data_size={2}", thread_id, curr_iter, total_elems);
+                        log::debug!("Received data from thread={0}, iter={1}, data_size={2}", thread_id, curr_iter, total_elems);
                         {
                             let grid_view = ArrayView4::from_shape(grid_shape, buffer.data_cpu.as_slice()).unwrap();
                             grid_data.lock().unwrap().assign(&grid_view);
@@ -419,9 +418,9 @@ impl App {
         let elapsed = global_timer.elapsed();
         let elapsed_secs: f64 = (elapsed.as_nanos() as f64)*1e-9;
         let cell_rate = ((total_cells * total_steps) as f64)/elapsed_secs * 1e-6;
-        info!("total_cells={0}", total_cells);
-        info!("total_loops={0}", total_steps);
-        info!("cell_rate={0:.3} M/s", cell_rate);
+        log::info!("total_cells={0}", total_cells);
+        log::info!("total_loops={0}", total_steps);
+        log::info!("cell_rate={0:.3} M/s", cell_rate);
 
         drop(tx_step_events);
         drop(tx_readback_requests);

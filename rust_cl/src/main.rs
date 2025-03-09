@@ -1,4 +1,4 @@
-use log::{info, error};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use opencl3::{
     device::Device, 
@@ -76,12 +76,12 @@ fn handle_args(args: &Args) -> Result<(Platform, Device), ClError> {
     }
 
     let Some(platform) = platforms.get(args.platform_index) else {
-        error!("Platform index {0} is outside the range of {1} platforms", args.platform_index, platforms.len());
+        log::error!("Platform index {0} is outside the range of {1} opencl platforms", args.platform_index, platforms.len());
         list_platforms(platforms.as_slice());
         std::process::exit(1);
     };
 
-    info!("Selected platform id={0}, name={1}, vendor={2}, version={3}",
+    log::info!("Selected opencl platform id={0}, name={1}, vendor={2}, version={3}",
         args.platform_index,
         platform.name().unwrap_or("?".to_owned()),
         platform.version().unwrap_or("?".to_owned()),
@@ -97,12 +97,12 @@ fn handle_args(args: &Args) -> Result<(Platform, Device), ClError> {
     }
 
     let Some(device) = devices.get(args.device_index) else {
-        error!("Device index {0} is outside the range of {1} devices", args.device_index, devices.len());
+        log::error!("Device index {0} is outside the range of {1} opencl devices", args.device_index, devices.len());
         list_devices(devices.as_slice());
         std::process::exit(1);
     };
 
-    info!("Selected device id={0}, name={1}, vendor={2}, version={3}",
+    log::info!("Selected opencl device id={0}, name={1}, vendor={2}, version={3}",
         args.device_index,
         device.name().unwrap_or("?".to_owned()),
         device.version().unwrap_or("?".to_owned()),
@@ -117,6 +117,25 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let (_platform, device) = handle_args(&args)?;
 
+
+    let device_extensions = device.extensions()?;
+    let device_extensions: HashSet<&str> = device_extensions
+        .split_ascii_whitespace()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let required_extensions  = ["cl_khr_gl_sharing", "cl_khr_gl_event"];
+    let mut missing_extensions = vec![];
+    for extension in required_extensions {
+        if !device_extensions.contains(extension) {
+            missing_extensions.push(extension);
+        }
+    }
+    if !missing_extensions.is_empty() {
+        log::error!("The following extensions are missing: {0:?}", missing_extensions.as_slice());
+        return Ok(());
+    }
+
     let winit_event_loop = winit::event_loop::EventLoop::<UserEvent>::with_user_event().build()?;
     let (user_events_tx, user_events_rx) = crossbeam_channel::bounded::<UserEvent>(1024);
 
@@ -125,7 +144,7 @@ fn main() -> anyhow::Result<()> {
 
     let compute_thread = std::thread::spawn({
         move || -> anyhow::Result<()> {
-            info!("Running app");
+            log::info!("Running app");
             app.init_simulation_data();
             app.upload_simulation_data()?;
             app.run(args.total_steps, args.record_stride)?;
@@ -133,7 +152,7 @@ fn main() -> anyhow::Result<()> {
             let app_events = app.gpu_trace.get_chrome_events();
             let chrome_trace = Trace { events: app_events };
 
-            info!("Writing chome trace with {0} entries", chrome_trace.events.len());
+            log::info!("Writing chome trace with {0} entries", chrome_trace.events.len());
             let json_string = serde_json::to_string_pretty(&chrome_trace)?;
             let file = File::create("./trace.json")?;
             let mut writer = BufWriter::new(file);

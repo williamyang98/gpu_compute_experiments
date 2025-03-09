@@ -1,5 +1,4 @@
 use std::{ffi::c_void, ptr::null_mut};
-use log::error;
 use opencl3::{
     command_queue::CommandQueue, 
     device::Device,
@@ -88,12 +87,12 @@ impl Simulation {
         let program_src = std::fs::read_to_string("./src/shader.cl").expect("Shader file should exist");
         let mut program = Program::create_from_source(context, program_src.as_str())?;
         if let Err(err) = program.build(context.devices(), "") {
-            error!("Program failed to build with error={0}", err.to_string());
+            log::error!("Program failed to build with error={0}", err.to_string());
             for &device_id in context.devices() {
                 let status = program.get_build_status(device_id)?;
                 let log = program.get_build_log(device_id)?;
                 let device = Device::new(device_id);
-                error!("build log for device={0}, status={1}\n{2}",
+                log::error!("build log for device={0}, status={1}\n{2}",
                     device.name().unwrap_or("?".to_owned()),
                     status, &log,
                 );
