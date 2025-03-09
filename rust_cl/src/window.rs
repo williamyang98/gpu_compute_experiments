@@ -64,9 +64,10 @@ impl WinitWindow {
         });
         log::debug!("raw window handle: {:?}", raw_window_handle);
 
+        // Source: https://www.khronos.org/opengl/wiki/Compute_Shader
+        let compute_shader_version = glutin::context::Version { major: 4, minor: 3 };
         let context_attributes = glutin::context::ContextAttributesBuilder::new()
-            .with_context_api(glutin::context::ContextApi::OpenGl(None))
-            // .with_context_api(glutin::context::ContextApi::OpenGl(Some(glutin::context::Version { major: 4, minor: 6 })))
+            .with_context_api(glutin::context::ContextApi::OpenGl(Some(compute_shader_version)))
             .build(raw_window_handle);
         let fallback_context_attributes = glutin::context::ContextAttributesBuilder::new()
             .with_context_api(glutin::context::ContextApi::Gles(None))
