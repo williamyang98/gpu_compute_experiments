@@ -1,5 +1,5 @@
 use log::{info, error};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use opencl3::{
     device::Device, 
     error_codes::ClError, 
@@ -118,12 +118,15 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let (_platform, device) = handle_args(&args)?;
 
+    let winit_event_loop = winit::event_loop::EventLoop::<UserEvent>::with_user_event().build()?;
+    let (user_events_tx, user_events_rx) = crossbeam_channel::bounded::<UserEvent>(1024);
+
     let device = Arc::new(device);
+    let mut app = App::new(device, user_events_tx)?;
 
     let compute_thread = std::thread::spawn({
         move || -> anyhow::Result<()> {
             info!("Running app");
-            let mut app = App::new(device)?;
             app.init_simulation_data();
             app.upload_simulation_data()?;
             app.run(args.total_steps, args.record_stride)?;
@@ -141,12 +144,24 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
+    let user_events_thread = std::thread::spawn({
+        let event_loop = winit_event_loop.create_proxy();
+        move || -> anyhow::Result<()> {
+            for event in user_events_rx {
+                if let Err(_err) = event_loop.send_event(event) {
+                    break;
+                }
+            }
+            Ok(())
+        }
+    });
+
     let mut main_window = MainWindow::new();
-    let winit_event_loop = winit::event_loop::EventLoop::<UserEvent>::with_user_event().build()?;
     winit_event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
     winit_event_loop.run_app(&mut main_window)?;
 
     compute_thread.join().unwrap()?;
+    user_events_thread.join().unwrap()?;
 
     Ok(())
 }

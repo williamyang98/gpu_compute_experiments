@@ -17,6 +17,7 @@ use super::{
     simulation::{Simulation, SimulationCpuData},
     constants as C,
     chrome_trace::{TraceSpan, TraceEvent},
+    gui::UserEvent,
 };
 
 struct ReadbackBuffer<T> {
@@ -146,10 +147,11 @@ pub struct App {
     pub gpu_trace: AppGpuTrace,
     e_field_readback_array: Vec<Arc<Mutex<ReadbackBuffer<f32>>>>,
     thread_pool: ThreadPool,
+    user_events: crossbeam_channel::Sender<UserEvent>,
 }
 
 impl App {
-    pub fn new(device: Arc<Device>) -> Result<Self, ClError> {
+    pub fn new(device: Arc<Device>, user_events: crossbeam_channel::Sender<UserEvent>) -> Result<Self, ClError> {
         let context = Arc::new(Context::from_device(&device)?);
 
         let grid_size = Array1::from(vec![16, 256, 512]);
@@ -181,6 +183,7 @@ impl App {
             gpu_trace,
             e_field_readback_array,
             thread_pool,
+            user_events,
         })
     }
 
@@ -389,6 +392,11 @@ impl App {
                 curr_iter
             }).unwrap();
             queue.flush()?;
+            let _ = self.user_events.send(UserEvent::SetProgress {
+                curr_step: curr_iter+1,
+                total_steps,
+            });
+
         }
         queue.finish()?;
         // benchmark performance

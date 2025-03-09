@@ -200,6 +200,10 @@ impl winit::application::ApplicationHandler<UserEvent> for MainWindow {
     }
 
     fn user_event(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop, event: UserEvent) {
-        self.gui.handle_user_event(event);
+        let is_repaint = self.gui.handle_user_event(event);
+        if is_repaint {
+            let window = self.window.as_mut().expect("Event loop shouldn't be able to exist without window");
+            window.trigger_redraw();
+        }
     }
 }
