@@ -35,11 +35,10 @@ impl WinitWindow {
             .with_visible(false);
 
         let config_template_builder = glutin::config::ConfigTemplateBuilder::new()
-            .prefer_hardware_accelerated(None)
+            .prefer_hardware_accelerated(Some(true))
             .with_depth_size(0)
             .with_stencil_size(0)
             .with_transparency(false);
-
 
         // let glutin-winit helper crate handle the complex parts of opengl context creation
         log::debug!("trying to get gl_config");
@@ -65,9 +64,10 @@ impl WinitWindow {
         });
         log::debug!("raw window handle: {:?}", raw_window_handle);
 
-        let context_attributes =
-            glutin::context::ContextAttributesBuilder::new().build(raw_window_handle);
-        // by default, glutin will try to create a core opengl context. but, if it is not available, try to create a gl-es context using this fallback attributes
+        let context_attributes = glutin::context::ContextAttributesBuilder::new()
+            .with_context_api(glutin::context::ContextApi::OpenGl(None))
+            // .with_context_api(glutin::context::ContextApi::OpenGl(Some(glutin::context::Version { major: 4, minor: 6 })))
+            .build(raw_window_handle);
         let fallback_context_attributes = glutin::context::ContextAttributesBuilder::new()
             .with_context_api(glutin::context::ContextApi::Gles(None))
             .build(raw_window_handle);
@@ -234,6 +234,9 @@ impl winit::application::ApplicationHandler<UserEvent> for WinitApplication {
     }
 
     fn exiting(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
+        if let Some(ref window) = self.window {
+            window.window.set_visible(false);
+        }
         self.window = None;
         log::debug!("Destroyed winit window");
     }
