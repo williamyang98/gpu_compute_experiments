@@ -1,246 +1,152 @@
-use log::{info, error, debug};
+use log::{info, error};
 use std::sync::Arc;
+use opencl3::{
+    device::Device, 
+    error_codes::ClError, 
+    platform::{get_platforms, Platform},
+};
+use ytdlp_server::{
+    chrome_trace::Trace,
+    app::App,
+    gui::UserEvent,
+    window::MainWindow,
+};
+use std::io::{BufWriter, Write};
+use std::fs::File;
+use clap::Parser;
 
-struct WgpuWindow {
-    window: Arc<winit::window::Window>,
-    surface_config: wgpu::SurfaceConfiguration,
-    surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    egui_renderer: egui_wgpu::Renderer,
-    egui_state: egui_winit::State,
-    is_redraw_requested: bool,
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Platform id
+    #[arg(short, long, default_value_t = 0)]
+    platform_index: usize,
+    /// Device id
+    #[arg(short, long, default_value_t = 0)]
+    device_index: usize,
+    /// List platforms
+    #[arg(long)]
+    list_platforms: bool,
+    /// List devices
+    #[arg(long)]
+    list_devices: bool,
+    /// Total simulation steps
+    #[arg(long, default_value_t = 2048)]
+    total_steps: usize,
+    /// Record stride
+    #[arg(long)]
+    record_stride: Option<usize>,
 }
 
-impl WgpuWindow {
-    async fn new(winit_window: winit::window::Window, context: egui::Context) -> anyhow::Result<Self> {
-        let window = Arc::new(winit_window);
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY),
-            backend_options: wgpu::BackendOptions::from_env_or_default(),
-            flags: wgpu::InstanceFlags::from_build_config().with_env(),
-        });
-        let surface = instance.create_surface(window.clone())?;
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: Default::default(),
-                force_fallback_adapter: false,
-                compatible_surface: Some(&surface),
-            })
-            .await
-            .ok_or(anyhow::Error::msg("Failed to find valid wgpu adapter"))?;
-
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default(), None)
-            .await?;
-
-        let initial_window_size = window.inner_size();
-
-        let mut surface_config = surface
-            .get_default_config(&adapter, initial_window_size.width, initial_window_size.height)
-            .ok_or(anyhow::Error::msg("Failed to get default config for wgpu surface"))?;
-        surface_config.format = wgpu::TextureFormat::Bgra8Unorm;
-        surface_config.present_mode = wgpu::PresentMode::AutoVsync;
-        surface.configure(&device, &surface_config);
-
-        let egui_renderer = egui_wgpu::Renderer::new(
-            &device,
-            surface_config.format, None,
-            1,
-            false,
-        );
-
-        let viewport_id = context.viewport_id();
-        let native_pixels_per_point = context.native_pixels_per_point();
-
-        let egui_state = egui_winit::State::new(
-            context,
-            viewport_id,
-            &window,
-            native_pixels_per_point,
-            window.theme(),
-            None,
-        );
-
-        Ok(Self {
-            window,
-            surface_config,
-            surface,
-            device,
-            queue,
-            egui_renderer,
-            egui_state,
-            is_redraw_requested: false,
-        })
+fn list_platforms(platforms: &[Platform]) {
+    use prettytable::{Table, Row, Cell, row};
+    let mut table = Table::new();
+    table.set_titles(Row::new(vec![Cell::new("Platforms").style_spec("H3c")]));
+    table.add_row(row!["id", "vendor", "version"]);
+    for (platform_index, platform) in platforms.iter().enumerate() {
+        table.add_row(row![
+            platform_index,
+            platform.vendor().unwrap_or("?".to_owned()),
+            platform.version().unwrap_or("?".to_owned()),
+        ]);
     }
-
-    fn on_resize(&mut self, width: u32, height: u32) {
-        let width = width.max(100);
-        let height = height.max(100);
-        self.surface_config.width = width;
-        self.surface_config.height = height;
-        self.surface.configure(&self.device, &self.surface_config);
-        self.trigger_redraw();
-    }
-
-    fn trigger_redraw(&mut self) {
-        if !self.is_redraw_requested {
-            self.is_redraw_requested = true;
-            self.window.request_redraw();
-        }
-    }
-
-    fn on_redraw_requested(&mut self, render_call: impl FnOnce(&mut egui::Ui)) {
-        self.is_redraw_requested = false;
-
-        // egui tessellation
-        let raw_input = self.egui_state.take_egui_input(&self.window);
-        let context = self.egui_state.egui_ctx();
-        context.begin_pass(raw_input);
-        egui::CentralPanel::default().show(context, render_call);
-        let full_output = context.end_pass();
-        let paint_jobs = context.tessellate(full_output.shapes, full_output.pixels_per_point);
-
-        // render pass
-        let frame = self.surface.get_current_texture().expect("Failed to acquire next swap chain texture");
-        let texture_view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let renderer = &mut self.egui_renderer;
-        let window_size = self.window.inner_size();
-        let screen_descriptor = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [window_size.width, window_size.height],
-            pixels_per_point: full_output.pixels_per_point,
-        };
-
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("main_window_command_encoder"),
-        });
-
-        // egui render pass
-        for (texture_id, image_delta) in full_output.textures_delta.set.iter() {
-            renderer.update_texture(&self.device, &self.queue, *texture_id, image_delta);
-        }
-        let _command_buffers = renderer.update_buffers(&self.device, &self.queue, &mut encoder, paint_jobs.as_slice(), &screen_descriptor);
-        let rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("egui_render_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &texture_view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-        });
-        let mut rpass = rpass.forget_lifetime();
-        renderer.render(&mut rpass, paint_jobs.as_slice(), &screen_descriptor);
-        // @NOTE: because of the stupid .forget_lifetime() call we need to manually drop this
-        //        otherwise the renderpass will persist after its supposed to be moved into the encoder
-        //        and cause a very confusing error about the renderpass not being finished
-        drop(rpass);
-        self.queue.submit(Some(encoder.finish()));
-        frame.present();
-    }
+    table.printstd();
 }
 
-struct AppGui {
-    name: String,
-    age: usize,
+fn list_devices(devices: &[Device]) {
+    use prettytable::{Table, Row, Cell, row};
+    let mut table = Table::new();
+    table.set_titles(Row::new(vec![Cell::new("Devices").style_spec("H4c")]));
+    table.add_row(row!["id", "name", "vendor", "version"]);
+    for (device_index, device) in devices.iter().enumerate() {
+        table.add_row(row![
+            device_index,
+            device.name().unwrap_or("?".to_owned()),
+            device.vendor().unwrap_or("?".to_owned()),
+            device.version().unwrap_or("?".to_owned()),
+        ]);
+    }
+    table.printstd();
 }
 
-impl AppGui {
-    fn new() -> Self {
-        Self {
-            name: "Arthur".to_owned(),
-            age: 42,
-        }
+fn handle_args(args: &Args) -> Result<(Platform, Device), ClError> {
+    let platforms = get_platforms()?;
+    if args.list_platforms {
+        list_platforms(platforms.as_slice());
+        std::process::exit(0);
     }
 
-    fn render(&mut self, ui: &mut egui::Ui) {
-        ui.heading("My egui Application");
-        ui.horizontal(|ui| {
-            let name_label = ui.label("Your name: ");
-            ui.text_edit_singleline(&mut self.name)
-                .labelled_by(name_label.id);
-        });
-        ui.add(egui::Slider::new(&mut self.age, 0..=120).text("age"));
-        if ui.button("Increment").clicked() {
-            self.age += 1;
-        }
-        ui.label(format!("Hello '{0}', age {1}", self.name.as_str(), self.age));
-    }
-}
+    let Some(platform) = platforms.get(args.platform_index) else {
+        error!("Platform index {0} is outside the range of {1} platforms", args.platform_index, platforms.len());
+        list_platforms(platforms.as_slice());
+        std::process::exit(1);
+    };
 
-struct MainWindow {
-    gui_state: AppGui,
-    window: Option<WgpuWindow>,
-}
+    info!("Selected platform id={0}, name={1}, vendor={2}, version={3}",
+        args.platform_index,
+        platform.name().unwrap_or("?".to_owned()),
+        platform.version().unwrap_or("?".to_owned()),
+        platform.vendor().unwrap_or("?".to_owned()),
+    );
 
-enum UserEvent {
+    let devices = platform.get_devices(opencl3::device::CL_DEVICE_TYPE_ALL)?;
+    let devices: Vec<Device> = devices.iter().map(|id| Device::new(*id)).collect();
 
-}
-
-impl MainWindow {
-    fn new() -> Self {
-        Self {
-            gui_state: AppGui::new(),
-            window: None,
-        }
+    if args.list_devices {
+        list_devices(devices.as_slice());
+        std::process::exit(0);
     }
 
-}
+    let Some(device) = devices.get(args.device_index) else {
+        error!("Device index {0} is outside the range of {1} devices", args.device_index, devices.len());
+        list_devices(devices.as_slice());
+        std::process::exit(1);
+    };
 
-impl winit::application::ApplicationHandler<UserEvent> for MainWindow {
-    // Apparently windows can get destroyed/created on a whim for mobile platforms which necessitates this
-    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        let context = egui::Context::default();
-        let viewport_builder = egui::ViewportBuilder::default();
-        context.set_fonts(egui::FontDefinitions::default());
-        context.set_style(egui::Style::default());
-        let winit_window = egui_winit::create_window(&context, event_loop, &viewport_builder).unwrap();
-        let wgpu_window = pollster::block_on(WgpuWindow::new(winit_window, context)).unwrap();
-        debug!("Created wgpu window");
+    info!("Selected device id={0}, name={1}, vendor={2}, version={3}",
+        args.device_index,
+        device.name().unwrap_or("?".to_owned()),
+        device.version().unwrap_or("?".to_owned()),
+        device.vendor().unwrap_or("?".to_owned()),
+    );
 
-        self.window = Some(wgpu_window);
-    }
-
-    fn window_event(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, _id: winit::window::WindowId, event: winit::event::WindowEvent) {
-        let window = self.window.as_mut().expect("Event loop shouldn't be able to exist without window");
-        // let egui consume events first
-        let response = window.egui_state.on_window_event(&window.window, &event);
-        if response.repaint {
-            window.trigger_redraw();
-        }
-        if response.consumed {
-            return;
-        }
-
-        use winit::event::WindowEvent;
-        match event {
-            WindowEvent::CloseRequested => {
-                info!("Closing winit window");
-                event_loop.exit();
-            },
-            WindowEvent::RedrawRequested => window.on_redraw_requested(|ui| self.gui_state.render(ui)),
-            WindowEvent::Resized(size) => window.on_resize(size.width, size.height),
-            event => debug!("Unhandled window event: {0:?}", event),
-        }
-    }
-
-    fn user_event(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, event: UserEvent) {
-
-    }
+    Ok((*platform, *device))
 }
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
+    let args = Args::parse();
+    let (_platform, device) = handle_args(&args)?;
+
+    let device = Arc::new(device);
+
+    let compute_thread = std::thread::spawn({
+        move || -> anyhow::Result<()> {
+            info!("Running app");
+            let mut app = App::new(device)?;
+            app.init_simulation_data();
+            app.upload_simulation_data()?;
+            app.run(args.total_steps, args.record_stride)?;
+
+            let app_events = app.gpu_trace.get_chrome_events();
+            let chrome_trace = Trace { events: app_events };
+
+            info!("Writing chome trace with {0} entries", chrome_trace.events.len());
+            let json_string = serde_json::to_string_pretty(&chrome_trace)?;
+            let file = File::create("./trace.json")?;
+            let mut writer = BufWriter::new(file);
+            writer.write_all(json_string.as_bytes())?;
+            writer.flush()?;
+            Ok(())
+        }
+    });
 
     let mut main_window = MainWindow::new();
     let winit_event_loop = winit::event_loop::EventLoop::<UserEvent>::with_user_event().build()?;
     winit_event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
     winit_event_loop.run_app(&mut main_window)?;
+
+    compute_thread.join().unwrap()?;
 
     Ok(())
 }
