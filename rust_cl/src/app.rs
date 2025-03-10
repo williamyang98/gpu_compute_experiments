@@ -13,6 +13,7 @@ use opencl3::{
     memory::{Buffer, CL_MEM_READ_WRITE, CL_MEM_WRITE_ONLY, ClMem},
 };
 use ndarray::{Array1,ArrayView4,Array4,s};
+use winit::raw_window_handle::RawWindowHandle;
 use super::{
     simulation::{Simulation, SimulationCpuData},
     constants as C,
@@ -28,6 +29,8 @@ pub enum UserEvent {
 pub struct EngineSettings {
     pub ssbo_dump: Option<glow::Buffer>,
     pub gl: Option<Arc<glow::Context>>,
+    pub raw_window_handle: Option<isize>,
+    pub raw_gl_handle: Option<isize>,
 }
 
 pub struct ReadbackBuffer<T> {
@@ -381,6 +384,8 @@ impl App {
                 let settings = self.engine_settings.lock().unwrap();
                 let ssbo_dump = settings.ssbo_dump.clone();
                 let gl_context = settings.gl.as_ref().unwrap().clone();
+                let raw_window_handle = settings.raw_window_handle.as_ref().unwrap().clone();
+                let raw_gl_handle = settings.raw_gl_handle.as_ref().unwrap().clone();
                 drop(settings);
                 if let Some(ssbo_dump) = ssbo_dump {
                     if self.ssbo_buffer.is_none() {
@@ -396,8 +401,8 @@ impl App {
                             &[
                                 // CL_GL_CONTEXT_KHR, (cl_context_properties) wglGetCurrentContext(), 
                                 // CL_WGL_HDC_KHR, (cl_context_properties) wglGetCurrentDC(), 
-                                CL_GL_CONTEXT_KHR,
-                                CL_WGL_HDC_KHR,
+                                CL_GL_CONTEXT_KHR, raw_gl_handle,
+                                CL_WGL_HDC_KHR, raw_window_handle,
                                 CL_CONTEXT_PLATFORM, self.platform.id() as isize, 
                                 0,
                             ],

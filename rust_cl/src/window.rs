@@ -1,5 +1,8 @@
 use std::sync::{Arc, Mutex};
 use std::num::NonZeroU32;
+use glutin::context::{AsRawContext, RawContext};
+use winit::raw_window_handle::RawWindowHandle;
+
 use super::{
     gui::AppGui,
     app::{EngineSettings, UserEvent},
@@ -7,6 +10,8 @@ use super::{
 
 struct WinitWindow {
     window: winit::window::Window,
+    raw_window_handle: isize,
+    raw_gl_handle: isize,
     gl: Arc<glow::Context>,
     gl_context: glutin::context::PossiblyCurrentContext,
     gl_display: glutin::display::Display,
@@ -92,13 +97,17 @@ impl WinitWindow {
             glutin_winit::finalize_window(event_loop, winit_window_builder.clone(), &gl_config)
                 .expect("failed to finalize glutin window")
         });
+        let raw_window_handle = window.window_handle().expect("failed to get window handle").as_raw();
+        // TODO: we are doing this to see if CL_WGL_HDC_KHR, wglGetCurrentDC() is platform specific
+        log::info!("Got a raw window handle of type: {0:?}", raw_window_handle);
+
         let (width, height): (u32, u32) = window.inner_size().into();
         let width = NonZeroU32::new(width).unwrap_or(NonZeroU32::MIN);
         let height = NonZeroU32::new(height).unwrap_or(NonZeroU32::MIN);
 
         let surface_attributes = glutin::surface::SurfaceAttributesBuilder::<glutin::surface::WindowSurface>::new()
             .build(
-                window.window_handle().expect("failed to get window handle").as_raw(),
+                raw_window_handle,
                 width,
                 height,
             );
@@ -119,6 +128,7 @@ impl WinitWindow {
             .unwrap();
         window.set_visible(true);
 
+
         log::debug!("creating glow context");
         let glow_context = unsafe {
             glow::Context::from_loader_function(|s| {
@@ -131,8 +141,20 @@ impl WinitWindow {
 
         let egui_glow = egui_glow::EguiGlow::new(event_loop, glow_context.clone(), None, None, true);
 
+        let raw_window_handle = match raw_window_handle {
+            RawWindowHandle::Win32(handle) => handle.hwnd.get(),
+            other => panic!("What the fuck am I supposed to do with other platforms here ???: {other:?}"),
+        };
+
+        let raw_gl_handle = match gl_context.raw_context() {
+            RawContext::Egl(v) => v as isize,
+            RawContext::Wgl(v) => v as isize,
+        };
+
         Ok(Self {
             window,
+            raw_window_handle,
+            raw_gl_handle,
             gl: glow_context,
             gl_context,
             gl_display,
@@ -201,7 +223,7 @@ impl winit::application::ApplicationHandler<UserEvent> for WinitApplication {
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         let window = pollster::block_on(WinitWindow::new(event_loop)).unwrap();
         log::debug!("Created winit window");
-        self.gui.on_gl_context(&window.gl);
+        self.gui.on_gl_context(&window.gl, window.raw_window_handle, window.raw_gl_handle);
         self.window = Some(window);
     }
 

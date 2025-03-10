@@ -1,5 +1,6 @@
 use glow::HasContext;
 use ndarray::{Array1, Array4};
+use winit::raw_window_handle::RawWindowHandle;
 use std::sync::{Arc, Mutex};
 use super::app::{EngineSettings, UserEvent};
 
@@ -30,7 +31,7 @@ impl AppGui {
         }
     }
 
-    pub fn on_gl_context(&mut self, gl: &Arc<glow::Context>) {
+    pub fn on_gl_context(&mut self, gl: &Arc<glow::Context>, raw_window_handle: isize, raw_gl_handle: isize) {
         let total_cells: usize = self.grid_shape.iter().product();
         let buffer_size = total_cells * std::mem::size_of::<f32>();
         unsafe {
@@ -47,7 +48,8 @@ impl AppGui {
             let mut engine = self.engine.lock().unwrap();
             engine.ssbo_dump = Some(buffer);
             engine.gl = Some(gl.clone());
-
+            engine.raw_window_handle = Some(raw_window_handle);
+            engine.raw_gl_handle = Some(raw_gl_handle);
         }
     }
 
