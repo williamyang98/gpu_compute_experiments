@@ -197,9 +197,10 @@ impl WinitApplication {
 impl winit::application::ApplicationHandler<UserEvent> for WinitApplication {
     // Apparently windows can get destroyed/created on a whim for mobile platforms which necessitates this
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        let wgpu_window = pollster::block_on(WinitWindow::new(event_loop)).unwrap();
+        let window = pollster::block_on(WinitWindow::new(event_loop)).unwrap();
         log::debug!("Created winit window");
-        self.window = Some(wgpu_window);
+        self.gui.on_gl_context(window.gl.as_ref());
+        self.window = Some(window);
     }
 
     fn window_event(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, _id: winit::window::WindowId, event: winit::event::WindowEvent) {
