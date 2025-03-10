@@ -1,7 +1,7 @@
 use glow::HasContext;
 use ndarray::{Array1, Array4};
 use std::sync::{Arc, Mutex};
-use super::app::UserEvent;
+use super::app::{EngineSettings, UserEvent};
 
 pub struct AppGui {
     name: String,
@@ -12,10 +12,11 @@ pub struct AppGui {
     grid_data_iter: usize,
     grid_shape: Array1<usize>,
     grid_gpu_buffer: Option<glow::Buffer>,
+    engine: Arc<Mutex<EngineSettings>>,
 }
 
 impl AppGui {
-    pub fn new() -> Self {
+    pub fn new(engine: Arc<Mutex<EngineSettings>>) -> Self {
         Self {
             name: "Arthur".to_owned(),
             age: 42,
@@ -25,23 +26,28 @@ impl AppGui {
             grid_shape: Array1::from(vec![16,256,512,3]),
             grid_data_iter: 0,
             grid_gpu_buffer: None,
+            engine,
         }
     }
 
-    pub fn on_gl_context(&mut self, gl: &glow::Context) {
+    pub fn on_gl_context(&mut self, gl: &Arc<glow::Context>) {
         let total_cells: usize = self.grid_shape.iter().product();
         let buffer_size = total_cells * std::mem::size_of::<f32>();
         unsafe {
             log::info!("Creating opengl ssbo with size={0} bytes", buffer_size);
             let buffer = gl.create_buffer().unwrap();
-            egui_glow::check_for_gl_error!(gl, "SSBO create");
+            egui_glow::check_for_gl_error!(&gl, "SSBO create");
             gl.bind_buffer(glow::SHADER_STORAGE_BUFFER, Some(buffer));
-            egui_glow::check_for_gl_error!(gl, "SSBO bind");
+            egui_glow::check_for_gl_error!(&gl, "SSBO bind");
             gl.buffer_data_size(glow::SHADER_STORAGE_BUFFER, buffer_size as i32, glow::DYNAMIC_DRAW);
-            egui_glow::check_for_gl_error!(gl, "SSBO buffer size");
+            egui_glow::check_for_gl_error!(&gl, "SSBO buffer size");
             gl.bind_buffer(glow::SHADER_STORAGE_BUFFER, None);
-            egui_glow::check_for_gl_error!(gl, "SSBO unbind");
+            egui_glow::check_for_gl_error!(&gl, "SSBO unbind");
             self.grid_gpu_buffer = Some(buffer);
+            let mut engine = self.engine.lock().unwrap();
+            engine.ssbo_dump = Some(buffer);
+            engine.gl = Some(gl.clone());
+
         }
     }
 

@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::num::NonZeroU32;
 use super::{
     gui::AppGui,
-    app::UserEvent,
+    app::{EngineSettings, UserEvent},
 };
 
 struct WinitWindow {
@@ -183,13 +183,15 @@ impl Drop for WinitWindow {
 pub struct WinitApplication {
     gui: AppGui,
     window: Option<WinitWindow>,
+    engine: Arc<Mutex<EngineSettings>>,
 }
 
 impl WinitApplication {
-    pub fn new() -> Self {
+    pub fn new(engine: Arc<Mutex<EngineSettings>>) -> Self {
         Self {
-            gui: AppGui::new(),
+            gui: AppGui::new(engine.clone()),
             window: None,
+            engine,
         }
     }
 }
@@ -199,7 +201,7 @@ impl winit::application::ApplicationHandler<UserEvent> for WinitApplication {
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         let window = pollster::block_on(WinitWindow::new(event_loop)).unwrap();
         log::debug!("Created winit window");
-        self.gui.on_gl_context(window.gl.as_ref());
+        self.gui.on_gl_context(&window.gl);
         self.window = Some(window);
     }
 

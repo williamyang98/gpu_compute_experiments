@@ -7,7 +7,7 @@ use opencl3::{
 };
 use ytdlp_server::{
     chrome_trace::Trace,
-    app::{App, UserEvent},
+    app::{App, UserEvent, EngineSettings},
     window::WinitApplication,
 };
 use std::io::{BufWriter, Write};
@@ -115,7 +115,7 @@ fn handle_args(args: &Args) -> Result<(Platform, Device), ClError> {
 fn main() -> anyhow::Result<()> {
     env_logger::init();
     let args = Args::parse();
-    let (_platform, device) = handle_args(&args)?;
+    let (platform, device) = handle_args(&args)?;
 
 
     let device_extensions = device.extensions()?;
@@ -139,8 +139,11 @@ fn main() -> anyhow::Result<()> {
     let winit_event_loop = winit::event_loop::EventLoop::<UserEvent>::with_user_event().build()?;
     let (user_events_tx, user_events_rx) = crossbeam_channel::bounded::<UserEvent>(1024);
 
+    let platform = Arc::new(platform);
     let device = Arc::new(device);
-    let mut app = App::new(device, user_events_tx)?;
+    let engine = Arc::new(Mutex::new(EngineSettings::default()));
+    let mut app = App::new(platform, device, user_events_tx, engine.clone())?;
+    let mut main_window = WinitApplication::new(engine);
 
     let compute_thread = std::thread::spawn({
         move || -> anyhow::Result<()> {
@@ -174,7 +177,6 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
-    let mut main_window = WinitApplication::new();
     winit_event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
     winit_event_loop.run_app(&mut main_window)?;
 

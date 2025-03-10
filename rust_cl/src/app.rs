@@ -5,11 +5,12 @@ use crossbeam_channel::bounded;
 use threadpool::ThreadPool;
 use opencl3::{
     command_queue::{CommandQueue, CL_QUEUE_PROFILING_ENABLE}, 
-    context::Context, device::Device, 
+    context::{Context, context::{CL_CONTEXT_PLATFORM}}, 
+    device::Device, platform::Platform,
     error_codes::ClError, 
     event::Event,
     types::cl_bool,
-    memory::{Buffer, CL_MEM_READ_WRITE},
+    memory::{Buffer, CL_MEM_READ_WRITE, CL_MEM_WRITE_ONLY, ClMem},
 };
 use ndarray::{Array1,ArrayView4,Array4,s};
 use super::{
@@ -21,6 +22,12 @@ use super::{
 pub enum UserEvent {
     SetProgress { curr_step: usize, total_steps: usize },
     GridDownload { data: Arc<Mutex<Array4<f32>>>, thread_id: usize, curr_iter: usize },
+}
+
+#[derive(Default)]
+pub struct EngineSettings {
+    pub ssbo_dump: Option<glow::Buffer>,
+    pub gl: Option<Arc<glow::Context>>,
 }
 
 pub struct ReadbackBuffer<T> {
@@ -142,6 +149,7 @@ impl AppGpuTrace {
 }
 
 pub struct App {
+    platform: Arc<Platform>,
     device: Arc<Device>,
     context: Arc<Context>,
     grid_size: Array1<usize>,
@@ -151,10 +159,12 @@ pub struct App {
     e_field_readback_array: Vec<Arc<Mutex<ReadbackBuffer<f32>>>>,
     thread_pool: ThreadPool,
     user_events: crossbeam_channel::Sender<UserEvent>,
+    engine_settings: Arc<Mutex<EngineSettings>>,
+    ssbo_buffer: Option<Buffer<f32>>,
 }
 
 impl App {
-    pub fn new(device: Arc<Device>, user_events: crossbeam_channel::Sender<UserEvent>) -> Result<Self, ClError> {
+    pub fn new(platform: Arc<Platform>, device: Arc<Device>, user_events: crossbeam_channel::Sender<UserEvent>, engine_settings: Arc<Mutex<EngineSettings>>) -> Result<Self, ClError> {
         let context = Arc::new(Context::from_device(&device)?);
 
         let grid_size = Array1::from(vec![16, 256, 512]);
@@ -178,6 +188,7 @@ impl App {
         let thread_pool = ThreadPool::new(TOTAL_READBACK_BUFFERS + 1);
 
         Ok(Self {
+            platform,
             device,
             context,
             grid_size,
@@ -187,6 +198,8 @@ impl App {
             e_field_readback_array,
             thread_pool,
             user_events,
+            engine_settings,
+            ssbo_buffer: None,
         })
     }
 
@@ -353,6 +366,7 @@ impl App {
 
         // let queue_props = 0;
         let queue_props = CL_QUEUE_PROFILING_ENABLE;
+        let ssbo_queue = CommandQueue::create_default(&self.context, queue_props)?;
         let queue = CommandQueue::create_default(&self.context, queue_props)?;
         let global_timer = Instant::now();
         for curr_iter in 0..total_steps {
@@ -364,40 +378,85 @@ impl App {
             let [ev_update_e_field, ev_update_h_field] = self.simulation.step(&queue, workgroup_size.clone(), &[])?;
             let is_record = record_stride.map(|stride| curr_iter % stride == 0).unwrap_or(false);
             if is_record {
-                // process results in readback thread
-                if let Ok(thread_id) = rx_readback_available.recv() {
-                    let mut buffer_lock = self.e_field_readback_array[thread_id].lock().unwrap();
-                    let buffer = &mut *buffer_lock;
-                    // copy gpu to gpu on separate context
-                    let ev_copy = unsafe {
-                        buffer.queue.enqueue_copy_buffer(
-                            &self.simulation.e_field,
-                            &mut buffer.data_gpu, 
-                            0, 0, buffer.data_cpu.len() * std::mem::size_of::<f32>(),
-                            &[ev_update_e_field.get()]
-                        )
-                    }?;
-                    // TODO: Attempt to synchronise copy/step so that we don't have race condition during copy
-                    //       Can we do this in a better way without stalling main thread??
+                let settings = self.engine_settings.lock().unwrap();
+                let ssbo_dump = settings.ssbo_dump.clone();
+                let gl_context = settings.gl.as_ref().unwrap().clone();
+                drop(settings);
+                if let Some(ssbo_dump) = ssbo_dump {
+                    if self.ssbo_buffer.is_none() {
+                        // https://github.com/KhronosGroup/OpenCL-Headers/blob/main/CL/cl_gl.h
+                        const CL_GL_CONTEXT_KHR: isize = 0x2008;
+                        const CL_EGL_DISPLAY_KHR: isize = 0x2009;
+                        const CL_GLX_DISPLAY_KHR: isize = 0x200A;
+                        const CL_WGL_HDC_KHR: isize = 0x200B;
+                        const CL_CGL_SHAREGROUP_KHR: isize = 0x200C;
+                        // TODO: this pain of figuring this out is totally not worth it!!!
+                        let gl_context = Context::from_devices(
+                            &[self.device.id()],
+                            &[
+                                // CL_GL_CONTEXT_KHR, (cl_context_properties) wglGetCurrentContext(), 
+                                // CL_WGL_HDC_KHR, (cl_context_properties) wglGetCurrentDC(), 
+                                CL_GL_CONTEXT_KHR,
+                                CL_WGL_HDC_KHR,
+                                CL_CONTEXT_PLATFORM, self.platform.id() as isize, 
+                                0,
+                            ],
+                            None, std::ptr::null_mut(),
+                        )?;
+                        log::info!("Creating ssbo buffer binding between opengl to opencl");
+                        let ssbo_buffer = unsafe { Buffer::<f32>::create_from_gl_buffer(&gl_context, CL_MEM_WRITE_ONLY, ssbo_dump.0.get()) }?;
+                        log::info!("Finished creating ssbo buffer binding between opengl to opencl");
+                        self.ssbo_buffer = Some(ssbo_buffer);
+                    }
+
+                    log::info!("Performing opencl to opengl copy");
+                    let ssbo_buffer = self.ssbo_buffer.as_mut().unwrap();
+                    let ev_acquire_gl = unsafe { ssbo_queue.enqueue_acquire_gl_objects(&[ssbo_buffer.get()], &[]) }?;
+
+                    let total_cells: usize = self.grid_size.iter().product();
+                    let buffer_size = total_cells * std::mem::size_of::<f32>();
+                    let ev_copy = unsafe { ssbo_queue.enqueue_copy_buffer(&self.simulation.e_field, ssbo_buffer, 0, 0, buffer_size, &[ev_update_e_field.get(), ev_acquire_gl.get()]) }?;
+                    let ev_release_gl = unsafe { ssbo_queue.enqueue_release_gl_objects(&[ssbo_buffer.get()], &[ev_copy.get()]) }?;
+                    let _ev = unsafe { ssbo_queue.enqueue_barrier_with_wait_list(&[ev_release_gl.get()]) }?;
                     unsafe { queue.enqueue_barrier_with_wait_list(&[ev_copy.get(), ev_update_h_field.get()]) }?;
-                    // copy gpu to cpu on separate context
-                    let ev_read = unsafe {
-                        buffer.queue.enqueue_read_buffer(
-                            &buffer.data_gpu,
-                            false as cl_bool, 0, 
-                            buffer.data_cpu.as_mut_slice(),
-                            &[ev_copy.get()],
-                        )
-                    }?;
-                    unsafe { buffer.queue.enqueue_barrier_with_wait_list(&[ev_read.get()]) }?;
-                    tx_readback_requests[thread_id].send(
-                        ReadbackRequest {
-                            ev_copy,
-                            ev_read,
-                            curr_iter,
-                        }
-                    ).unwrap();
+                } else {
+                    unsafe { queue.enqueue_barrier_with_wait_list(&[ev_update_h_field.get()]) }?;
                 }
+
+                // process results in readback thread
+                // if let Ok(thread_id) = rx_readback_available.recv() {
+                //     let mut buffer_lock = self.e_field_readback_array[thread_id].lock().unwrap();
+                //     let buffer = &mut *buffer_lock;
+                //     // copy gpu to gpu on separate context
+                //     let ev_copy = unsafe {
+                //         buffer.queue.enqueue_copy_buffer(
+                //             &self.simulation.e_field,
+                //             &mut buffer.data_gpu, 
+                //             0, 0, buffer.data_cpu.len() * std::mem::size_of::<f32>(),
+                //             &[ev_update_e_field.get()]
+                //         )
+                //     }?;
+                //     // TODO: Attempt to synchronise copy/step so that we don't have race condition during copy
+                //     //       Can we do this in a better way without stalling main thread??
+                //     unsafe { queue.enqueue_barrier_with_wait_list(&[ev_copy.get(), ev_update_h_field.get()]) }?;
+                //     // copy gpu to cpu on separate context
+                //     let ev_read = unsafe {
+                //         buffer.queue.enqueue_read_buffer(
+                //             &buffer.data_gpu,
+                //             false as cl_bool, 0, 
+                //             buffer.data_cpu.as_mut_slice(),
+                //             &[ev_copy.get()],
+                //         )
+                //     }?;
+                //     unsafe { buffer.queue.enqueue_barrier_with_wait_list(&[ev_read.get()]) }?;
+                //     tx_readback_requests[thread_id].send(
+                //         ReadbackRequest {
+                //             ev_copy,
+                //             ev_read,
+                //             curr_iter,
+                //         }
+                //     ).unwrap();
+                // }
             } else {
                 unsafe { queue.enqueue_barrier_with_wait_list(&[ev_update_h_field.get()]) }?;
             }
@@ -407,6 +466,7 @@ impl App {
                 curr_iter
             }).unwrap();
             queue.flush()?;
+            ssbo_queue.flush()?;
             let _ = self.user_events.send(UserEvent::SetProgress {
                 curr_step: curr_iter+1,
                 total_steps,
@@ -414,6 +474,7 @@ impl App {
 
         }
         queue.finish()?;
+        ssbo_queue.finish()?;
         // benchmark performance
         let elapsed = global_timer.elapsed();
         let elapsed_secs: f64 = (elapsed.as_nanos() as f64)*1e-9;
