@@ -34,7 +34,9 @@ fn main(@builtin(global_invocation_id) _i: vec3<u32>) {
     let Ez: f32 = grid[src_i+2];
     let E_vec: vec3<f32> = vec3<f32>(Ex,Ey,Ez);
     // let colour = vec4<f32>(abs(E_vec), 1.0);
-    let v = length(E_vec) * params.scale;
-    let colour = vec4<f32>(v,v,v,1.0);
+    // let v = length(E_vec) * params.scale;
+    // let colour = vec4<f32>(v,v,v,1.0);
+    let v: f32 = Ex*params.scale;
+    let colour = vec4<f32>(max(-v, 0.0),max(v, 0.0),0.0,1.0);
     textureStore(grid_tex, dst_i, colour);
 }
