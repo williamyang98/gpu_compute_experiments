@@ -11,10 +11,10 @@ struct CopyParams {
     size_y: u32,
     size_z: u32,
     copy_x: u32,
+    scale: f32,
 }
 
 struct CopyGridToTextureShader {
-    params: CopyParams,
     params_uniform: wgpu::Buffer,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
@@ -27,7 +27,6 @@ impl CopyGridToTextureShader {
         let program_src = std::fs::read_to_string("./src/read_buffer_to_texture.wgsl").expect("Shader file should exist");
         let program_src = Cow::Borrowed(program_src.as_str());
 
-        let params = CopyParams::default();
         let params_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("copy_grid_to_texture_params_uniform"),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::UNIFORM,
@@ -90,7 +89,6 @@ impl CopyGridToTextureShader {
         Self {
             device,
             queue,
-            params,
             params_uniform,
             bind_group_layout,
             compute_pipeline,
@@ -101,18 +99,14 @@ impl CopyGridToTextureShader {
         encoder: &mut wgpu::CommandEncoder,
         grid_buffer: wgpu::BufferBinding,
         texture: &wgpu::TextureView,
-        grid_size: Array1<usize>, copy_x: usize,
+        params: CopyParams,
     ) {
         let workgroup_size: [usize; 2] = [1, 256];
         let dispatch_size = [
-            (grid_size[1] as f32 / workgroup_size[0] as f32).ceil() as usize,
-            (grid_size[2] as f32 / workgroup_size[1] as f32).ceil() as usize,
+            (params.size_y as f32 / workgroup_size[0] as f32).ceil() as usize,
+            (params.size_z as f32 / workgroup_size[1] as f32).ceil() as usize,
         ];
-        self.params.size_x = grid_size[0] as u32;
-        self.params.size_y = grid_size[1] as u32;
-        self.params.size_z = grid_size[2] as u32;
-        self.params.copy_x = copy_x as u32;
-        self.queue.write_buffer(&self.params_uniform, 0, bytemuck::cast_slice(&[self.params]));
+        self.queue.write_buffer(&self.params_uniform, 0, bytemuck::cast_slice(&[params]));
 
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("copy_grid_to_texture_bind_group"),
@@ -147,14 +141,18 @@ impl CopyGridToTextureShader {
 pub struct AppGui {
     name: String,
     age: usize,
+    x_slice: usize,
     curr_step: usize,
     total_steps: usize,
     total_grid_downloads: usize,
     grid_data_iter: usize,
+    grid_data_iter_show: usize,
+    grid_data: Option<Arc<Mutex<Array4<f32>>>>,
     grid_buffer: Arc<wgpu::Buffer>,
     grid_texture: Arc<wgpu::Texture>,
     grid_texture_view: Arc<wgpu::TextureView>,
     grid_texture_id: egui::TextureId,
+    grid_scale: f32,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     copy_shader: CopyGridToTextureShader,
@@ -195,25 +193,54 @@ impl AppGui {
             total_steps: 0,
             total_grid_downloads: 0,
             grid_data_iter: 0,
+            grid_data_iter_show: 0,
+            grid_data: None,
             grid_buffer,
             grid_texture,
             grid_texture_view,
             grid_texture_id,
+            grid_scale: 1.0,
             device,
             queue,
             copy_shader,
+            x_slice: 8,
         }
     }
 
     pub fn on_command_encoder(&mut self, encoder: &mut wgpu::CommandEncoder, renderer: &mut egui_wgpu::Renderer) {
+        if self.grid_data_iter_show < self.grid_data_iter {
+            if let Some(ref data) = self.grid_data {
+                let dst_view = self.queue.write_buffer_with(
+                    &self.grid_buffer,
+                    0,
+                    NonZero::<u64>::new(self.grid_buffer.size()).unwrap(),
+                );
+                if let Some(mut dst_view) = dst_view {
+                    let src_view = data.lock().unwrap();
+                    log::debug!("Performing gpu mapped write: {0:?}", src_view.shape());
+                    let src_view = bytemuck::cast_slice(src_view.as_slice().unwrap());
+                    dst_view.copy_from_slice(src_view);
+                    drop(dst_view);
+                    self.grid_data_iter_show = self.grid_data_iter;
+                    self.total_grid_downloads += 1;
+                } else {
+                    log::error!("Failed to acquire grid buffer for writing: curr_iter={0}", self.grid_data_iter);
+                }
+            }
+        }
         let grid_size = Array1::<usize>::from(vec![16, 256, 512]);
-        let copy_x = grid_size[0]/2;
+        let params = CopyParams {
+            size_x: grid_size[0] as u32,
+            size_y: grid_size[1] as u32,
+            size_z: grid_size[2] as u32,
+            copy_x: self.x_slice as u32,
+            scale: self.grid_scale,
+        };
         self.copy_shader.create_compute_pass(
             encoder,
             self.grid_buffer.as_entire_buffer_binding(),
             &self.grid_texture_view,
-            grid_size,
-            copy_x,
+            params,
         );
         renderer.update_egui_texture_from_wgpu_texture(&self.device, &self.grid_texture_view, wgpu::FilterMode::Linear, self.grid_texture_id);
     }
@@ -243,6 +270,9 @@ impl AppGui {
 
             ui.label(format!("Total grid downloads: {0}", self.total_grid_downloads));
             ui.label(format!("Grid iter: {0}", self.grid_data_iter));
+
+            ui.add(egui::Slider::new(&mut self.grid_scale, 0.0..=10.0).text("scale"));
+            ui.add(egui::Slider::new(&mut self.x_slice, 0..=15).text("x_slice"));
             egui::Frame::new()
                 .fill(egui::Color32::WHITE)
                 .stroke(egui::Stroke::new(1.0, egui::Color32::BLACK))
@@ -266,23 +296,8 @@ impl AppGui {
                 if curr_iter <= self.grid_data_iter {
                     return false;
                 }
-                let dst_view = self.queue.write_buffer_with(
-                    &self.grid_buffer,
-                    0,
-                    NonZero::<u64>::new(self.grid_buffer.size()).unwrap(),
-                );
-                let Some(mut dst_view) = dst_view else {
-                    log::error!("Failed to acquire grid buffer for writing: curr_iter={0}", curr_iter);
-                    return false;
-                };
-                let src_view = data.lock().unwrap();
-                log::debug!("Performing gpu mapped write: {0:?}", src_view.shape());
-                let src_view = bytemuck::cast_slice(src_view.as_slice().unwrap());
-                dst_view.copy_from_slice(src_view);
-                drop(dst_view);
-                self.queue.submit(None);
+                self.grid_data = Some(data.clone());
                 self.grid_data_iter = curr_iter;
-                self.total_grid_downloads += 1;
                 true
             },
         }
