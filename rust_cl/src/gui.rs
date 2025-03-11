@@ -139,8 +139,6 @@ impl CopyGridToTextureShader {
 }
 
 pub struct AppGui {
-    name: String,
-    age: usize,
     x_slice: usize,
     curr_step: usize,
     total_steps: usize,
@@ -187,8 +185,6 @@ impl AppGui {
         let copy_shader = CopyGridToTextureShader::new(device.clone(), queue.clone());
 
         Self {
-            name: "Arthur".to_owned(),
-            age: 42,
             curr_step: 0,
             total_steps: 0,
             total_grid_downloads: 0,
@@ -247,17 +243,7 @@ impl AppGui {
 
     pub fn render(&mut self, context: &egui::Context) {
         egui::CentralPanel::default().show(context, |ui| {
-            ui.heading("My egui Application");
-            ui.horizontal(|ui| {
-                let name_label = ui.label("Your name: ");
-                ui.text_edit_singleline(&mut self.name)
-                    .labelled_by(name_label.id);
-            });
-            ui.add(egui::Slider::new(&mut self.age, 0..=120).text("age"));
-            if ui.button("Increment").clicked() {
-                self.age += 1;
-            }
-            ui.label(format!("Hello '{0}', age {1}", self.name.as_str(), self.age));
+            ui.heading("FDTD visualiser");
 
             ui.add_enabled_ui(self.total_steps > 0, |ui| {
                 let progress = (self.curr_step as f32)/(self.total_steps.max(1) as f32);
@@ -269,17 +255,23 @@ impl AppGui {
             });
 
             ui.label(format!("Total grid downloads: {0}", self.total_grid_downloads));
-            ui.label(format!("Grid iter: {0}", self.grid_data_iter));
+            ui.label(format!("Grid iter: {0}", self.grid_data_iter_show));
 
-            ui.add(egui::Slider::new(&mut self.grid_scale, 0.0..=10.0).text("scale"));
+            ui.add(egui::Slider::new(&mut self.grid_scale, 0.0..=10.0).text("amplitude"));
             ui.add(egui::Slider::new(&mut self.x_slice, 0..=15).text("x_slice"));
             egui::Frame::new()
                 .fill(egui::Color32::WHITE)
                 .stroke(egui::Stroke::new(1.0, egui::Color32::BLACK))
                 .show(ui, |ui| {
+                    let mut width = ui.available_width();
+                    let mut height = width / 2.0;
+                    if height > ui.available_height() {
+                        height = ui.available_height();
+                        width = height * 2.0;
+                    }
                     ui.image(egui::ImageSource::Texture(egui::load::SizedTexture {
                         id: self.grid_texture_id,
-                        size: egui::Vec2 { x: 512.0, y: 256.0 },
+                        size: egui::Vec2 { x: width, y: height },
                     }));
                 });
         });
