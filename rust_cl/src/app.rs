@@ -166,7 +166,7 @@ impl App {
         let simulation = Simulation::new(grid_size.clone(), &context)?;
 
         let mut gpu_trace = AppGpuTrace::default();
-        const TOTAL_READBACK_BUFFERS: usize = 3;
+        const TOTAL_READBACK_BUFFERS: usize = 8;
         gpu_trace.readbacks.resize_with(TOTAL_READBACK_BUFFERS, || {
             Arc::new(Mutex::new(TraceFieldReadback::default()))
         });
@@ -380,7 +380,7 @@ impl App {
                     }?;
                     // TODO: Attempt to synchronise copy/step so that we don't have race condition during copy
                     //       Can we do this in a better way without stalling main thread??
-                    unsafe { queue.enqueue_barrier_with_wait_list(&[ev_copy.get(), ev_update_h_field.get()]) }?;
+                    unsafe { queue.enqueue_barrier_with_wait_list(&[ev_update_h_field.get()]) }?;
                     // copy gpu to cpu on separate context
                     let ev_read = unsafe {
                         buffer.queue.enqueue_read_buffer(
