@@ -8,7 +8,7 @@ use opencl3::{
 use ytdlp_server::{
     chrome_trace::Trace,
     app::{App, UserEvent},
-    window::MainWindow,
+    window::WinitApplication,
 };
 use std::io::{BufWriter, Write};
 use std::fs::File;
@@ -155,7 +155,7 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
-    let mut main_window = MainWindow::new();
+    let mut main_window = WinitApplication::new();
     winit_event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
     winit_event_loop.run_app(&mut main_window)?;
 

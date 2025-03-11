@@ -9,10 +9,11 @@ struct WgpuWindow {
     window: Arc<winit::window::Window>,
     surface_config: wgpu::SurfaceConfiguration,
     surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
     egui_renderer: egui_wgpu::Renderer,
     egui_state: egui_winit::State,
+    app_gui: AppGui,
     is_redraw_requested: bool,
 }
 
@@ -37,6 +38,8 @@ impl WgpuWindow {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor::default(), None)
             .await?;
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
 
         let initial_window_size = window.inner_size();
 
@@ -47,7 +50,7 @@ impl WgpuWindow {
         surface_config.present_mode = wgpu::PresentMode::AutoVsync;
         surface.configure(&device, &surface_config);
 
-        let egui_renderer = egui_wgpu::Renderer::new(
+        let mut egui_renderer = egui_wgpu::Renderer::new(
             &device,
             surface_config.format, None,
             1,
@@ -66,6 +69,8 @@ impl WgpuWindow {
             None,
         );
 
+        let app_gui = AppGui::new(device.clone(), queue.clone(), &mut egui_renderer);
+
         Ok(Self {
             window,
             surface_config,
@@ -75,6 +80,7 @@ impl WgpuWindow {
             egui_renderer,
             egui_state,
             is_redraw_requested: false,
+            app_gui,
         })
     }
 
@@ -94,14 +100,14 @@ impl WgpuWindow {
         }
     }
 
-    fn on_redraw_requested(&mut self, render_call: impl FnOnce(&egui::Context)) {
+    fn on_redraw_requested(&mut self) {
         self.is_redraw_requested = false;
 
         // egui tessellation
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let context = self.egui_state.egui_ctx();
         context.begin_pass(raw_input);
-        render_call(context);
+        self.app_gui.render(context);
         let full_output = context.end_pass();
         let paint_jobs = context.tessellate(full_output.shapes, full_output.pixels_per_point);
 
@@ -118,6 +124,7 @@ impl WgpuWindow {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("main_window_command_encoder"),
         });
+        self.app_gui.on_command_encoder(&mut encoder, renderer);
 
         // egui render pass
         for (texture_id, image_delta) in full_output.textures_delta.set.iter() {
@@ -150,22 +157,20 @@ impl WgpuWindow {
 }
 
 
-pub struct MainWindow {
-    gui: AppGui,
+pub struct WinitApplication {
     window: Option<WgpuWindow>,
 }
 
-impl MainWindow {
+impl WinitApplication {
     pub fn new() -> Self {
         Self {
-            gui: AppGui::new(),
             window: None,
         }
     }
 
 }
 
-impl winit::application::ApplicationHandler<UserEvent> for MainWindow {
+impl winit::application::ApplicationHandler<UserEvent> for WinitApplication {
     // Apparently windows can get destroyed/created on a whim for mobile platforms which necessitates this
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         let context = egui::Context::default();
@@ -196,16 +201,16 @@ impl winit::application::ApplicationHandler<UserEvent> for MainWindow {
                 info!("Closing winit window");
                 event_loop.exit();
             },
-            WindowEvent::RedrawRequested => window.on_redraw_requested(|ctx| self.gui.render(ctx)),
+            WindowEvent::RedrawRequested => window.on_redraw_requested(),
             WindowEvent::Resized(size) => window.on_resize(size.width, size.height),
             event => debug!("Unhandled window event: {0:?}", event),
         }
     }
 
     fn user_event(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop, event: UserEvent) {
-        let is_repaint = self.gui.handle_user_event(event);
+        let window = self.window.as_mut().expect("Event loop shouldn't be able to exist without window");
+        let is_repaint = window.app_gui.handle_user_event(event);
         if is_repaint {
-            let window = self.window.as_mut().expect("Event loop shouldn't be able to exist without window");
             window.trigger_redraw();
         }
     }
