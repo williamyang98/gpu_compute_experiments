@@ -166,7 +166,7 @@ impl App {
         let simulation = Simulation::new(grid_size.clone(), &context)?;
 
         let mut gpu_trace = AppGpuTrace::default();
-        const TOTAL_READBACK_BUFFERS: usize = 8;
+        const TOTAL_READBACK_BUFFERS: usize = 1;
         gpu_trace.readbacks.resize_with(TOTAL_READBACK_BUFFERS, || {
             Arc::new(Mutex::new(TraceFieldReadback::default()))
         });
