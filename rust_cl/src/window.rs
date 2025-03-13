@@ -85,8 +85,8 @@ impl WgpuWindow {
     }
 
     fn on_resize(&mut self, width: u32, height: u32) {
-        let width = width.max(100);
-        let height = height.max(100);
+        let width = width.max(1);
+        let height = height.max(1);
         self.surface_config.width = width;
         self.surface_config.height = height;
         self.surface.configure(&self.device, &self.surface_config);
@@ -117,7 +117,7 @@ impl WgpuWindow {
         let renderer = &mut self.egui_renderer;
         let window_size = self.window.inner_size();
         let screen_descriptor = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [window_size.width, window_size.height],
+            size_in_pixels: [window_size.width.max(1), window_size.height.max(1)],
             pixels_per_point: full_output.pixels_per_point,
         };
 

@@ -266,6 +266,7 @@ impl AppGui {
                 ui.radio_value(&mut self.grid_axis, 0, "x");
                 ui.radio_value(&mut self.grid_axis, 1, "y");
                 ui.radio_value(&mut self.grid_axis, 2, "z");
+                ui.radio_value(&mut self.grid_axis, 3, "abs");
             });
             ui.add(egui::Slider::new(&mut self.grid_scale, 0.0..=10.0).text("amplitude"));
             ui.add(egui::Slider::new(&mut self.x_slice, 0..=15).text("x_slice"));

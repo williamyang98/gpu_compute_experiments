@@ -353,8 +353,10 @@ impl App {
         let mut signal = Array1::<f32>::zeros(signal_length);
         for (i, v) in signal.iter_mut().enumerate() {
             let dt = 3.1415*(i as f32)/((signal_length-1) as f32);
-            let a = dt.sin();
-            *v = a*a;
+            let w = dt.sin();
+            let w = w*w;
+            let a = 1.0;
+            *v = w*a;
         }
 
         // let queue_props = 0;
