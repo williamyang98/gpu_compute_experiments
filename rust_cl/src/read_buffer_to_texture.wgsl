@@ -4,6 +4,7 @@ struct Params {
     size_z: u32,
     copy_x: u32,
     scale: f32,
+    axis: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -29,14 +30,8 @@ fn main(@builtin(global_invocation_id) _i: vec3<u32>) {
     let src_i = n_dims*(src_x*Nzy + iy*Nz + iz);
     let dst_i = vec2<u32>(u32(iz), u32(iy));
 
-    let Ex: f32 = grid[src_i+0];
-    let Ey: f32 = grid[src_i+1];
-    let Ez: f32 = grid[src_i+2];
-    let E_vec: vec3<f32> = vec3<f32>(Ex,Ey,Ez);
-    // let colour = vec4<f32>(abs(E_vec), 1.0);
-    // let v = length(E_vec) * params.scale;
-    // let colour = vec4<f32>(v,v,v,1.0);
-    let v: f32 = Ex*params.scale;
+    let E: f32 = grid[src_i+params.axis];
+    let v: f32 = E*params.scale;
     let colour = vec4<f32>(max(-v, 0.0),max(v, 0.0),0.0,1.0);
     textureStore(grid_tex, dst_i, colour);
 }

@@ -12,6 +12,7 @@ struct CopyParams {
     size_z: u32,
     copy_x: u32,
     scale: f32,
+    axis: u32,
 }
 
 struct CopyGridToTextureShader {
@@ -151,6 +152,7 @@ pub struct AppGui {
     grid_texture_view: Arc<wgpu::TextureView>,
     grid_texture_id: egui::TextureId,
     grid_scale: f32,
+    grid_axis: u32,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     copy_shader: CopyGridToTextureShader,
@@ -196,6 +198,7 @@ impl AppGui {
             grid_texture_view,
             grid_texture_id,
             grid_scale: 1.0,
+            grid_axis: 0,
             device,
             queue,
             copy_shader,
@@ -231,6 +234,7 @@ impl AppGui {
             size_z: grid_size[2] as u32,
             copy_x: self.x_slice as u32,
             scale: self.grid_scale,
+            axis: self.grid_axis,
         };
         self.copy_shader.create_compute_pass(
             encoder,
@@ -257,6 +261,12 @@ impl AppGui {
             ui.label(format!("Total grid downloads: {0}", self.total_grid_downloads));
             ui.label(format!("Grid iter: {0}", self.grid_data_iter_show));
 
+
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut self.grid_axis, 0, "x");
+                ui.radio_value(&mut self.grid_axis, 1, "y");
+                ui.radio_value(&mut self.grid_axis, 2, "z");
+            });
             ui.add(egui::Slider::new(&mut self.grid_scale, 0.0..=10.0).text("amplitude"));
             ui.add(egui::Slider::new(&mut self.x_slice, 0..=15).text("x_slice"));
             egui::Frame::new()

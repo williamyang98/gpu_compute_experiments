@@ -56,9 +56,48 @@ __kernel void update_E(
     const float a0 = A0[i0];
     const float a1 = A1[i0];
 
-    E[i+0] = a0*(E[i+0] + a1*cHx);
-    E[i+1] = a0*(E[i+1] + a1*cHy);
-    E[i+2] = a0*(E[i+2] + a1*cHz);
+    // hard coded PML
+    float a0x = a0;
+    float a0y = a0;
+    float a0z = a0;
+
+    if (1) {
+        const float b = 1.0;
+        int pml_border = 10;
+        if (iz >= (Nz-pml_border)) {
+            float d = (float)(iz-(Nz-pml_border)) / (float)(pml_border);
+            float v = 1.0-(d*d*d)*b;
+            a0z = v;
+        } else if (iz <= pml_border) {
+            float d = (float)(pml_border-iz) / (float)(pml_border);
+            float v = 1.0-(d*d*d)*b;
+            a0z = v;
+        }
+        pml_border = 10;
+        if (iy >= (Ny-pml_border)) {
+            float d = (float)(iy-(Ny-pml_border)) / (float)(pml_border);
+            float v = 1.0-(d*d*d)*b;
+            a0y = v;
+        } else if (iy <= pml_border) {
+            float d = (float)(pml_border-iy) / (float)(pml_border);
+            float v = 1.0-(d*d*d)*b;
+            a0y = v;
+        }
+        pml_border = 3;
+        if (ix >= (Nx-pml_border)) {
+            float d = (float)(ix-(Nx-pml_border)) / (float)(pml_border);
+            float v = 1.0-(d*d*d)*b;
+            a0x = v;
+        } else if (ix <= pml_border) {
+            float d = (float)(pml_border-ix) / (float)(pml_border);
+            float v = 1.0-(d*d*d)*b;
+            a0x = v;
+        }
+    }
+
+    E[i+0] = a0x*(E[i+0] + a1*cHx);
+    E[i+1] = a0y*(E[i+1] + a1*cHy);
+    E[i+2] = a0z*(E[i+2] + a1*cHz);
     return;
 }
 

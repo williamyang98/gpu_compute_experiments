@@ -136,14 +136,14 @@ impl Simulation {
         unsafe {
             let border: usize = 20;
             let width: usize = 12;
-            let height: usize = 3;
+            let height: usize = 2;
             let ev_update_current_source = ExecuteKernel::new(&self.kernel_update_current_source)
                 .set_arg(&self.e_field)
                 .set_arg(&value)
                 .set_arg(&(n_x as i32))
                 .set_arg(&(n_y as i32))
                 .set_arg(&(n_z as i32))
-                .set_global_work_offsets(&[7, n_y/2-width/2, n_z/2])
+                .set_global_work_offsets(&[n_x/2-height/2, n_y/2-width/2, n_z/2])
                 .set_global_work_sizes(&[height,width,1])
                 .set_local_work_sizes(&[height,width,1])
                 .set_event_wait_list(wait_events)

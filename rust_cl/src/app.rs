@@ -195,8 +195,13 @@ impl App {
         let data = &mut self.cpu_data;
         let grid_size = &data.grid_size;
         let (n_x, n_y, n_z) = (grid_size[0], grid_size[1], grid_size[2]);
+        let courant_number: f32 = 1.0/f32::sqrt(3.0) * 0.99;
         let d_xyz: f32 = 1e-5;
-        let dt: f32 = 1e-14;
+        // make sure each time step doesn't result in light travelling more than one grid scale (scaled to courant factor)
+        // step_factor = (c*dt)/d_xyz
+        // let dt: f32 = 1e-14; // produces a step factor of 0.3
+        let dt = (courant_number * d_xyz)/C::C_0; 
+        log::info!("Using a time step of dt={:.3e}", dt);
 
         data.d_xyz = d_xyz;
         data.dt = dt;
@@ -208,26 +213,26 @@ impl App {
 
         // 16,256,512
 
+        let border: usize = 40;
+        let height: usize = 2;
+        let width: usize = 20;
         // add conductors
         if true {
             let sigma_0: f32 = 1e8;
             // ground plane
-            let border: usize = 20;
-            let i = s![3..=6, border..n_y-border, border..n_z-border];
+            let i = s![n_x/2-height/2-2..n_x/2-height/2, border..n_y-border, border..n_z-border];
             data.sigma_k.slice_mut(i).fill(sigma_0);
             // transmission line
-            let width: usize = 20;
-            let center = n_y/2;
-            let i = s![10..=13, center-width/2..center+width/2, border*2..n_z-border*2];
+            let i = s![n_x/2+height/2..n_x/2+height/2+2, n_y/2-width/2..n_y/2+width/2, border*2..n_z-border*2];
             // let i = s![14..=15, border..n_y-border, border..n_z-border];
             data.sigma_k.slice_mut(i).fill(sigma_0);
         }
 
         // add dielectric
         if true {
-            let border: usize = 20;
+            let border: usize = 40;
             let e_k = C::E_0*4.1;
-            let i = s![4..=12, border..n_y-border, border..n_z-border];
+            let i = s![n_x/2-height/2-2..n_x/2+height/2+2, border..n_y-border, border..n_z-border];
             data.e_k.slice_mut(i).fill(e_k);
         }
 
@@ -418,9 +423,11 @@ impl App {
         // benchmark performance
         let elapsed = global_timer.elapsed();
         let elapsed_secs: f64 = (elapsed.as_nanos() as f64)*1e-9;
+        let step_rate = ((total_steps) as f64)/elapsed_secs;
         let cell_rate = ((total_cells * total_steps) as f64)/elapsed_secs * 1e-6;
         info!("total_cells={0}", total_cells);
         info!("total_loops={0}", total_steps);
+        info!("step_rate={0:.1} steps/s", step_rate);
         info!("cell_rate={0:.3} M/s", cell_rate);
 
         drop(tx_step_events);
