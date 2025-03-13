@@ -214,16 +214,17 @@ impl App {
         // 16,256,512
 
         let border: usize = 40;
-        let height: usize = 2;
-        let width: usize = 20;
+        let height: usize = 4;
+        let width: usize = 10;
+        let thickness: usize = 1;
         // add conductors
         if true {
             let sigma_0: f32 = 1e8;
             // ground plane
-            let i = s![n_x/2-height/2-2..n_x/2-height/2, border..n_y-border, border..n_z-border];
+            let i = s![n_x/2-height/2-thickness..n_x/2-height/2, border..n_y-border, border..n_z-border];
             data.sigma_k.slice_mut(i).fill(sigma_0);
             // transmission line
-            let i = s![n_x/2+height/2..n_x/2+height/2+2, n_y/2-width/2..n_y/2+width/2, border*2..n_z-border*2];
+            let i = s![n_x/2+height/2..n_x/2+height/2+thickness, n_y/2-width/2..n_y/2+width/2, border*2..n_z-border*2];
             // let i = s![14..=15, border..n_y-border, border..n_z-border];
             data.sigma_k.slice_mut(i).fill(sigma_0);
         }
@@ -234,6 +235,22 @@ impl App {
             let e_k = C::E_0*4.1;
             let i = s![n_x/2-height/2-2..n_x/2+height/2+2, border..n_y-border, border..n_z-border];
             data.e_k.slice_mut(i).fill(e_k);
+        }
+
+        // add termination resistor
+        if true {
+            let R: f32 = 41.6;
+            // let R: f32 = 37.0;
+            let l = (height as f32) * d_xyz;
+            let A = ((width as f32)*d_xyz) * ((thickness as f32)*d_xyz);
+            let sigma = l/(R*A);
+            let z_start = border*2;
+            let i = s![n_x/2-height/2..n_x/2+height/2, n_y/2-width/2..n_y/2+width/2, z_start..z_start+thickness];
+            data.sigma_k.slice_mut(i).fill(sigma);
+
+            let z_end = n_z-border*2;
+            let i = s![n_x/2-height/2..n_x/2+height/2, n_y/2-width/2..n_y/2+width/2, z_end-thickness..z_end];
+            data.sigma_k.slice_mut(i).fill(sigma);
         }
 
         data.bake_constants();

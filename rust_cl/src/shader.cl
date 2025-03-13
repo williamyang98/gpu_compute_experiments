@@ -1,5 +1,6 @@
 __kernel void update_current_source(
-    __global float *E, const float E0,
+    __global float *E, __global float *H,
+    const float E0, const float H0,
     int Nx, int Ny, int Nz
 ) {
     const int ix = get_global_id(0);
@@ -16,6 +17,7 @@ __kernel void update_current_source(
     const int i = n_dims*i0;
 
     E[i+0] += E0;
+    H[i+1] -= H0;
 }
 
 __kernel void update_E(

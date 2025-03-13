@@ -134,12 +134,14 @@ impl Simulation {
         let (n_x, n_y, n_z) = (self.grid_size[0], self.grid_size[1], self.grid_size[2]);
         // TODO: make this user defineable
         unsafe {
-            let border: usize = 20;
-            let width: usize = 12;
-            let height: usize = 2;
+            let border: usize = 40;
+            let width: usize = 10;
+            let height: usize = 4;
             let ev_update_current_source = ExecuteKernel::new(&self.kernel_update_current_source)
                 .set_arg(&self.e_field)
+                .set_arg(&self.h_field)
                 .set_arg(&value)
+                .set_arg(&(value / C::Z_0))
                 .set_arg(&(n_x as i32))
                 .set_arg(&(n_y as i32))
                 .set_arg(&(n_z as i32))
