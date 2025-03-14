@@ -49,7 +49,8 @@ impl SimulationCpuData {
     }
 
     pub fn bake_constants(&mut self) {
-        self.a0.assign(&(1.0/(1.0 + &self.sigma_k/&self.e_k * self.dt)));
+        // self.a0.assign(&(1.0/(1.0 + &self.sigma_k/&self.e_k * self.dt)));
+        self.a0.assign(&(&-&self.sigma_k/&self.e_k * self.dt).exp());
         self.a1.assign(&(1.0/(&self.e_k * self.d_xyz) * self.dt));
         self.b0 = 1.0/(self.mu_k * self.d_xyz) * self.dt;
     }
@@ -136,7 +137,8 @@ impl Simulation {
         unsafe {
             let border: usize = 40;
             let width: usize = 10;
-            let height: usize = 4;
+            let height: usize = 1;
+            let thickness: usize = 1;
             let ev_update_current_source = ExecuteKernel::new(&self.kernel_update_current_source)
                 .set_arg(&self.e_field)
                 .set_arg(&self.h_field)
@@ -145,9 +147,10 @@ impl Simulation {
                 .set_arg(&(n_x as i32))
                 .set_arg(&(n_y as i32))
                 .set_arg(&(n_z as i32))
-                .set_global_work_offsets(&[n_x/2-height/2, n_y/2-width/2, n_z/2])
-                .set_global_work_sizes(&[height,width,1])
-                .set_local_work_sizes(&[height,width,1])
+                // .set_global_work_offsets(&[n_x/2-height/2, n_y/2-width/2, n_z/2])
+                .set_global_work_offsets(&[n_x/2-height/2, n_y/2-width/2, n_z-border*2-thickness])
+                .set_global_work_sizes(&[height,width,thickness])
+                .set_local_work_sizes(&[height,width,thickness])
                 .set_event_wait_list(wait_events)
                 .enqueue_nd_range(queue)?;
             Ok(ev_update_current_source)

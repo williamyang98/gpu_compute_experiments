@@ -216,6 +216,7 @@ impl App {
         let border: usize = 40;
         let height: usize = 4;
         let width: usize = 10;
+        let diff_spacing: usize = 5;
         let thickness: usize = 1;
         // add conductors
         if true {
@@ -226,6 +227,10 @@ impl App {
             // transmission line
             let i = s![n_x/2+height/2..n_x/2+height/2+thickness, n_y/2-width/2..n_y/2+width/2, border*2..n_z-border*2];
             // let i = s![14..=15, border..n_y-border, border..n_z-border];
+            data.sigma_k.slice_mut(i).fill(sigma_0);
+
+            // differential transmission line
+            let i = s![n_x/2+height/2..n_x/2+height/2+thickness, n_y/2-width/2+width+diff_spacing..n_y/2+width/2+width+diff_spacing, border*2..n_z-border*2];
             data.sigma_k.slice_mut(i).fill(sigma_0);
         }
 
@@ -244,12 +249,18 @@ impl App {
             let l = (height as f32) * d_xyz;
             let A = ((width as f32)*d_xyz) * ((thickness as f32)*d_xyz);
             let sigma = l/(R*A);
+            log::info!("Feedline has conductivity of {:.3e}", sigma);
+
             let z_start = border*2;
             let i = s![n_x/2-height/2..n_x/2+height/2, n_y/2-width/2..n_y/2+width/2, z_start..z_start+thickness];
+            data.sigma_k.slice_mut(i).fill(sigma);
+            let i = s![n_x/2-height/2..n_x/2+height/2, n_y/2-width/2+width+diff_spacing..n_y/2+width/2+width+diff_spacing, z_start..z_start+thickness];
             data.sigma_k.slice_mut(i).fill(sigma);
 
             let z_end = n_z-border*2;
             let i = s![n_x/2-height/2..n_x/2+height/2, n_y/2-width/2..n_y/2+width/2, z_end-thickness..z_end];
+            data.sigma_k.slice_mut(i).fill(sigma);
+            let i = s![n_x/2-height/2..n_x/2+height/2, n_y/2-width/2+width+diff_spacing..n_y/2+width/2+width+diff_spacing, z_end-thickness..z_end];
             data.sigma_k.slice_mut(i).fill(sigma);
         }
 
@@ -372,7 +383,7 @@ impl App {
             let dt = 3.1415*(i as f32)/((signal_length-1) as f32);
             let w = dt.sin();
             let w = w*w;
-            let a = 1.0;
+            let a = 40.0;
             *v = w*a;
         }
 

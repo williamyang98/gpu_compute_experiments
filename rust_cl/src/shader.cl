@@ -3,21 +3,57 @@ __kernel void update_current_source(
     const float E0, const float H0,
     int Nx, int Ny, int Nz
 ) {
-    const int ix = get_global_id(0);
-    const int iy = get_global_id(1);
-    const int iz = get_global_id(2);
+    {
+        const int ix = get_global_id(0);
+        const int iy = get_global_id(1);
+        const int iz = get_global_id(2);
 
-    if (ix >= Nx) return;
-    if (iy >= Ny) return;
-    if (iz >= Nz) return;
+        if (ix >= Nx) return;
+        if (iy >= Ny) return;
+        if (iz >= Nz) return;
 
-    const int n_dims = 3;
-    const int Nzy = Nz*Ny;
-    const int i0 = iz + iy*Nz + ix*Nzy;
-    const int i = n_dims*i0;
+        const int n_dims = 3;
+        const int Nzy = Nz*Ny;
+        const int i0 = iz + iy*Nz + ix*Nzy;
+        const int i = n_dims*i0;
 
-    E[i+0] += E0;
-    H[i+1] -= H0;
+        const float Ei = E[i+0];
+        const float Eo = E0;
+        const float Ed = Eo - Ei;
+        // settles exponentially according to 
+        // dEo/dt = sigma/epsilon * Ed
+        // dEo/dt = sigma/epsilon * (Ei - Eo)
+        // dEo/(Eo - Ei) = -sigma/epsilon * dt
+        // exp(Eo - Ei) = -sigma/epsilon * t
+        // Eo = Ei - (Ei - Eo)*exp(-sigma/epsilon*t)
+        // Therefore Ed*exp(-sigma/epsilon*dt) is the trend
+        const float a0 = exp(-2.07);
+        const float Ed_dt = a0*Ed;
+        const float En = Eo - Ed_dt;
+        E[i+0] = En;
+    }
+    {
+        const int ix = get_global_id(0);
+        const int iy = get_global_id(1) + 10 + 5;
+        const int iz = get_global_id(2);
+
+        if (ix >= Nx) return;
+        if (iy >= Ny) return;
+        if (iz >= Nz) return;
+
+        const int n_dims = 3;
+        const int Nzy = Nz*Ny;
+        const int i0 = iz + iy*Nz + ix*Nzy;
+        const int i = n_dims*i0;
+
+        const float Ei = E[i+0];
+        const float Eo = -E0;
+        const float Ed = Eo - Ei;
+        const float a0 = exp(-100.0);
+        const float Ed_dt = a0*Ed;
+        const float En = Eo - Ed_dt;
+        E[i+0] = En;
+    }
 }
 
 __kernel void update_E(
@@ -64,35 +100,35 @@ __kernel void update_E(
     float a0z = a0;
 
     if (1) {
-        const float b = 1.0;
+        const float b = 1.5;
         int pml_border = 10;
-        if (iz >= (Nz-pml_border)) {
-            float d = (float)(iz-(Nz-pml_border)) / (float)(pml_border);
-            float v = 1.0-(d*d*d)*b;
+        if (iz >= (Nz-pml_border-1)) {
+            float d = (float)(iz-(Nz-pml_border-1)) / (float)(pml_border);
+            float v = exp(-(d*d*d)*b);
             a0z = v;
         } else if (iz <= pml_border) {
             float d = (float)(pml_border-iz) / (float)(pml_border);
-            float v = 1.0-(d*d*d)*b;
+            float v = exp(-(d*d*d)*b);
             a0z = v;
         }
         pml_border = 10;
-        if (iy >= (Ny-pml_border)) {
-            float d = (float)(iy-(Ny-pml_border)) / (float)(pml_border);
-            float v = 1.0-(d*d*d)*b;
+        if (iy >= (Ny-pml_border-1)) {
+            float d = (float)(iy-(Ny-pml_border-1)) / (float)(pml_border);
+            float v = exp(-(d*d*d)*b);
             a0y = v;
         } else if (iy <= pml_border) {
             float d = (float)(pml_border-iy) / (float)(pml_border);
-            float v = 1.0-(d*d*d)*b;
+            float v = exp(-(d*d*d)*b);
             a0y = v;
         }
         pml_border = 3;
-        if (ix >= (Nx-pml_border)) {
-            float d = (float)(ix-(Nx-pml_border)) / (float)(pml_border);
-            float v = 1.0-(d*d*d)*b;
+        if (ix >= (Nx-pml_border-1)) {
+            float d = (float)(ix-(Nx-pml_border-1)) / (float)(pml_border);
+            float v = exp(-(d*d*d)*b);
             a0x = v;
         } else if (ix <= pml_border) {
             float d = (float)(pml_border-ix) / (float)(pml_border);
-            float v = 1.0-(d*d*d)*b;
+            float v = exp(-(d*d*d)*b);
             a0x = v;
         }
     }
