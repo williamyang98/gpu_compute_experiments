@@ -130,27 +130,20 @@ impl Simulation {
         Ok(())
     }
 
-    pub fn apply_voltage_source(&mut self, queue: &CommandQueue, value: f32, wait_events: &[cl_event]) -> Result<Event, ClError> {
+    pub fn apply_voltage_source(&mut self, queue: &CommandQueue, value: f32, offset: &[usize;3], size: &[usize;3], wait_events: &[cl_event]) -> Result<Event, ClError> {
 
         let (n_x, n_y, n_z) = (self.grid_size[0], self.grid_size[1], self.grid_size[2]);
-        // TODO: make this user defineable
         unsafe {
-            let border: usize = 40;
-            let width: usize = 10;
-            let height: usize = 1;
-            let thickness: usize = 1;
             let ev_update_current_source = ExecuteKernel::new(&self.kernel_update_current_source)
                 .set_arg(&self.e_field)
-                .set_arg(&self.h_field)
+                .set_arg(&self.a0)
                 .set_arg(&value)
-                .set_arg(&(value / C::Z_0))
                 .set_arg(&(n_x as i32))
                 .set_arg(&(n_y as i32))
                 .set_arg(&(n_z as i32))
-                // .set_global_work_offsets(&[n_x/2-height/2, n_y/2-width/2, n_z/2])
-                .set_global_work_offsets(&[n_x/2-height/2, n_y/2-width/2, n_z-border*2-thickness])
-                .set_global_work_sizes(&[height,width,thickness])
-                .set_local_work_sizes(&[height,width,thickness])
+                .set_global_work_offsets(offset)
+                .set_global_work_sizes(size)
+                .set_local_work_sizes(size)
                 .set_event_wait_list(wait_events)
                 .enqueue_nd_range(queue)?;
             Ok(ev_update_current_source)

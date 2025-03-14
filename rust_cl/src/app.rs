@@ -383,7 +383,7 @@ impl App {
             let dt = 3.1415*(i as f32)/((signal_length-1) as f32);
             let w = dt.sin();
             let w = w*w;
-            let a = 40.0;
+            let a = 1.0;
             *v = w*a;
         }
 
@@ -392,10 +392,21 @@ impl App {
         let queue = CommandQueue::create_default(&self.context, queue_props)?;
         let global_timer = Instant::now();
         for curr_iter in 0..total_steps {
-            if let Some(value) = signal.get(curr_iter) {
-                let ev = self.simulation.apply_voltage_source(&queue, *value, &[])?;
-                unsafe { queue.enqueue_barrier_with_wait_list(&[ev.get()]) }?;
-                tx_step_events.send(SimulationEvent::ApplySignal { event: ev, curr_iter }).unwrap();
+            if let Some(value) = signal.get(curr_iter).copied() {
+                let border: usize = 40;
+                let width: usize = 10;
+                let height: usize = 4;
+                let diff_spacing: usize = 5;
+                let thickness: usize = 1;
+
+                let offset: [usize;3] = [n_x/2-height/2, n_y/2-width/2, n_z-2*border-1];
+                let size: [usize;3] = [height, width, thickness];
+                let ev0 = self.simulation.apply_voltage_source(&queue, value, &offset, &size, &[])?;
+                let offset: [usize;3] = [n_x/2-height/2, n_y/2-width/2+width+diff_spacing, n_z-2*border-1];
+                let ev1 = self.simulation.apply_voltage_source(&queue, -value, &offset, &size, &[])?;
+                unsafe { queue.enqueue_barrier_with_wait_list(&[ev0.get(), ev1.get()]) }?;
+                tx_step_events.send(SimulationEvent::ApplySignal { event: ev0, curr_iter }).unwrap();
+                tx_step_events.send(SimulationEvent::ApplySignal { event: ev1, curr_iter }).unwrap();
             }
             let [ev_update_e_field, ev_update_h_field] = self.simulation.step(&queue, workgroup_size.clone(), &[])?;
             let is_record = record_stride.map(|stride| curr_iter % stride == 0).unwrap_or(false);

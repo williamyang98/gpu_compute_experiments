@@ -1,59 +1,36 @@
 __kernel void update_current_source(
-    __global float *E, __global float *H,
-    const float E0, const float H0,
+    __global float *E, __global const float* A0, const float E0,
     int Nx, int Ny, int Nz
 ) {
-    {
-        const int ix = get_global_id(0);
-        const int iy = get_global_id(1);
-        const int iz = get_global_id(2);
+    // a0 = exp(-sigma_k/e_k*dt)
 
-        if (ix >= Nx) return;
-        if (iy >= Ny) return;
-        if (iz >= Nz) return;
+    const int ix = get_global_id(0);
+    const int iy = get_global_id(1);
+    const int iz = get_global_id(2);
 
-        const int n_dims = 3;
-        const int Nzy = Nz*Ny;
-        const int i0 = iz + iy*Nz + ix*Nzy;
-        const int i = n_dims*i0;
+    if (ix >= Nx) return;
+    if (iy >= Ny) return;
+    if (iz >= Nz) return;
 
-        const float Ei = E[i+0];
-        const float Eo = E0;
-        const float Ed = Eo - Ei;
-        // settles exponentially according to 
-        // dEo/dt = sigma/epsilon * Ed
-        // dEo/dt = sigma/epsilon * (Ei - Eo)
-        // dEo/(Eo - Ei) = -sigma/epsilon * dt
-        // exp(Eo - Ei) = -sigma/epsilon * t
-        // Eo = Ei - (Ei - Eo)*exp(-sigma/epsilon*t)
-        // Therefore Ed*exp(-sigma/epsilon*dt) is the trend
-        const float a0 = exp(-2.07);
-        const float Ed_dt = a0*Ed;
-        const float En = Eo - Ed_dt;
-        E[i+0] = En;
-    }
-    {
-        const int ix = get_global_id(0);
-        const int iy = get_global_id(1) + 10 + 5;
-        const int iz = get_global_id(2);
+    const int n_dims = 3;
+    const int Nzy = Nz*Ny;
+    const int i0 = iz + iy*Nz + ix*Nzy;
+    const int i = n_dims*i0;
 
-        if (ix >= Nx) return;
-        if (iy >= Ny) return;
-        if (iz >= Nz) return;
-
-        const int n_dims = 3;
-        const int Nzy = Nz*Ny;
-        const int i0 = iz + iy*Nz + ix*Nzy;
-        const int i = n_dims*i0;
-
-        const float Ei = E[i+0];
-        const float Eo = -E0;
-        const float Ed = Eo - Ei;
-        const float a0 = exp(-100.0);
-        const float Ed_dt = a0*Ed;
-        const float En = Eo - Ed_dt;
-        E[i+0] = En;
-    }
+    const float Ei = E[i+0];
+    const float Eo = E0;
+    const float Ed = Eo - Ei;
+    // settles exponentially according to 
+    // dEo/dt = sigma/epsilon * Ed
+    // dEo/dt = sigma/epsilon * (Ei - Eo)
+    // dEo/(Eo - Ei) = -sigma/epsilon * dt
+    // exp(Eo - Ei) = -sigma/epsilon * t
+    // Eo = Ei - (Ei - Eo)*exp(-sigma/epsilon*t)
+    // Therefore Ed*exp(-sigma/epsilon*dt) is the trend
+    const float a0 = A0[i0];
+    const float Ed_dt = a0*Ed;
+    const float En = Eo - Ed_dt;
+    E[i+0] = En;
 }
 
 __kernel void update_E(
@@ -61,7 +38,7 @@ __kernel void update_E(
     __global const float *A0, __global const float *A1,
     int Nx, int Ny, int Nz
 ) {
-    // a0 = 1/(1+sigma_k/e_k*dt)
+    // a0 = exp(-sigma_k/e_k*dt)
     // a1 = 1/(e_k*d_xyz) * dt
 
     const int ix = get_global_id(0);
